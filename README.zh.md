@@ -1,8 +1,61 @@
+<div align="center">
+
 # DABench ReAct Baseline
 
 [English](README.md) | 中文
 
-这个仓库包含 DABench 的公开 ReAct baseline。它会读取公开 demo 数据集任务，并生成 `prediction.csv` 供后续评测使用。
+[![官方网站](https://img.shields.io/badge/Official%20Website-Visit%20KDD%20Cup%202026-0ea5e9?style=for-the-badge&logo=googlechrome&logoColor=white&labelColor=0f172a)](https://kdd2026.kdd.org/)
+[![Demo 数据集](https://img.shields.io/badge/Demo%20Dataset-Download%20Phase%201-f59e0b?style=for-the-badge&logo=googledrive&logoColor=white&labelColor=0f172a)](https://drive.google.com/file/d/1n8vrRIjhVz0STj1DYZ7fSNL2JHtswu4J/view?usp=share_link)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=0f172a)](https://discord.gg/vRr7uyK9)
+
+</div>
+
+> 面向 DABench 公开 demo 数据集的 ReAct baseline。仓库默认读取 `data/public/input/`，并为后续评测生成预测结果。
+
+## KDD Cup 背景
+
+| 项目 | 内容 |
+| --- | --- |
+| 赛事 | KDD Cup 2026: Data Agents for Complex Data Analysis |
+| 阶段 | Phase 1 公开 demo baseline |
+| 任务 | 面向异构任务上下文的自治数据分析 |
+| 评测 | 公开 demo 使用 `data/public/output/`；hidden test 仅提供 `input/` |
+
+## 一览
+
+| 数据输入 | `data/public/input/` |
+| 公开 demo 标准答案 | `data/public/output/task_<id>/gold.csv` |
+| hidden test 数据 | 仅提供 `input/`，不提供 `output/` |
+| 入口命令 | `uv run dabench <command> --config PATH` |
+| 默认输出目录 | `artifacts/runs/` |
+
+## 快速开始
+
+1. 请先按照 `uv` 官方安装指南安装 `uv`：
+   - https://docs.astral.sh/uv/getting-started/installation/
+2. 在 macOS 和 Linux 上，官方独立安装命令为：
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+3. 安装项目依赖：
+
+   ```bash
+   uv sync
+   ```
+
+4. 检查数据集根目录是否可见：
+
+   ```bash
+   uv run dabench status --config configs/react_baseline.example.yaml
+   ```
+
+5. 运行 baseline：
+
+   ```bash
+   uv run dabench run-benchmark --config configs/react_baseline.example.yaml
+   ```
 
 ## 数据集
 
@@ -14,7 +67,8 @@ data/public/input/task_<id>/
 └── context/
 ```
 
-公开 demo 数据集的标准答案文件单独放在 `data/public/output/task_<id>/gold.csv`。hidden test set 只提供 `input/`，不会包含 `output/`。
+公开 demo 的标准答案文件单独放在 `data/public/output/task_<id>/gold.csv`。
+hidden test set 只提供 `input/`，不会包含 `output/`。
 
 `task.json` 包含：
 
@@ -28,12 +82,6 @@ data/public/input/task_<id>/
 - JSON 文件
 - SQLite / DB 文件
 - 文本文档
-
-## 安装
-
-```bash
-uv sync
-```
 
 ## 配置
 
@@ -59,157 +107,48 @@ run:
 
 配置字段说明：
 
-- `dataset.root_path`
-  - 公开 demo `input/` 数据集根目录
-  - 相对路径按项目根目录解析
-- `agent.model`
-  - 模型名称
-- `agent.api_base`
-  - OpenAI-compatible 接口根地址
-- `agent.api_key`
-  - API key，直接从配置文件读取
-- `agent.max_steps`
-  - 单个任务允许的最大 ReAct 步数
-- `agent.temperature`
-  - 模型采样温度
-- `run.output_dir`
-  - 运行产物输出目录
-- `run.run_id`
-  - 可选，指定运行目录名
-  - 不传时默认使用 UTC 时间戳
-  - 必须是单个目录名；若目录已存在会直接报错
-- `run.max_workers`
-  - `run-benchmark` 并行 worker 数
-- `run.task_timeout_seconds`
-  - 单个任务允许的最长墙钟时间
-  - 设为 `0` 或负数可关闭任务级超时
+| 字段 | 含义 |
+| --- | --- |
+| `dataset.root_path` | 公开 demo `input/` 数据集根目录。相对路径按项目根目录解析。 |
+| `agent.model` | 模型名称。 |
+| `agent.api_base` | OpenAI-compatible 接口根地址。 |
+| `agent.api_key` | API key，直接从配置文件读取。 |
+| `agent.max_steps` | 单个任务允许的最大 ReAct 步数。 |
+| `agent.temperature` | 模型采样温度。 |
+| `run.output_dir` | 运行产物输出目录。 |
+| `run.run_id` | 可选，指定运行目录名。不传时默认使用 UTC 时间戳；必须是单个目录名，已存在会报错。 |
+| `run.max_workers` | `run-benchmark` 并行 worker 数。 |
+| `run.task_timeout_seconds` | 单个任务允许的最长墙钟时间。设为 `0` 或负数可关闭任务级超时。 |
 
 ## CLI
-
-CLI 入口：
 
 ```bash
 uv run dabench <command> --config PATH [options]
 ```
 
-### `status`
+| 命令 | 作用 | 示例 |
+| --- | --- | --- |
+| `status` | 查看项目路径、配置路径、数据集根目录和公开任务数量。 | `uv run dabench status --config configs/react_baseline.example.yaml` |
+| `inspect-task` | 查看任务元信息，并列出 `context/` 下可访问文件。 | `uv run dabench inspect-task task_1 --config configs/react_baseline.local.yaml` |
+| `run-task` | 对单个任务运行 baseline，并写出结果。 | `uv run dabench run-task task_1 --config configs/react_baseline.local.yaml` |
+| `run-benchmark` | 批量运行整个公开数据集。 | `uv run dabench run-benchmark --config configs/react_baseline.local.yaml` |
 
-作用：
-
-- 查看项目路径
-- 查看当前实际使用的配置文件路径
-- 查看当前实际使用的数据集根目录
-- 查看公开任务数量统计
-
-用法：
-
-```bash
-uv run dabench status --config configs/react_baseline.example.yaml
-```
-
-参数：
-
-- `--config PATH`
-  - YAML 配置文件路径
-  - 必填
-
-### `inspect-task`
-
-作用：
-
-- 查看单个任务元信息
-- 列出 `context/` 下可访问文件
-
-用法：
-
-```bash
-uv run dabench inspect-task task_1 --config configs/react_baseline.local.yaml
-```
-
-参数：
-
-- `task_id`
-  - 必填位置参数
-- `--config PATH`
-  - YAML 配置文件路径
-  - 必填
-
-### `run-task`
-
-作用：
-
-- 对单个任务运行 ReAct baseline
-- 调用模型、执行工具并写出结果
-
-用法：
-
-```bash
-uv run dabench run-task task_1 --config configs/react_baseline.local.yaml
-```
-
-参数：
-
-- `task_id`
-  - 必填位置参数
-- `--config PATH`
-  - YAML 配置文件路径
-  - 必填
-
-### `run-benchmark`
-
-作用：
-
-- 批量运行整个公开数据集
-- 对于公开 demo 集，可以对照单独的 `data/public/output/` 中的标准答案
-- 写出每个任务的结果和整次运行摘要
-- 运行过程中显示紧凑型实时进度条，包含成功/失败统计和吞吐
-
-用法：
-
-```bash
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml --limit 5
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml --limit 20
-```
-
-参数：
-
-- `--config PATH`
-  - YAML 配置文件路径
-  - 必填
-- `--limit N`
-  - 最多运行多少个任务
+`run-benchmark` 还支持 `--limit N`，用于限制任务数量。
 
 ## Tools
 
 当前暴露给模型的工具有：
 
-- `list_context`
-  - 列出 `context/` 下的文件和目录
-  - 输入：`max_depth`
-- `read_csv`
-  - 读取 CSV 预览
-  - 输入：`path`、`max_rows`
-- `read_json`
-  - 读取 JSON 预览
-  - 输入：`path`、`max_chars`
-- `read_doc`
-  - 读取文本文档预览
-  - 输入：`path`、`max_chars`
-- `inspect_sqlite_schema`
-  - 查看 SQLite / DB 文件中的表结构
-  - 输入：`path`
-- `execute_context_sql`
-  - 对 `context/` 内 SQLite / DB 文件执行只读 SQL
-  - 输入：`path`、`sql`、`limit`
-- `execute_python`
-  - 在任务 `context/` 目录内执行任意 Python 代码
-  - 输入：`code`
-  - 固定超时：`30` 秒
-  - 返回：标准输出 `output`
-- `answer`
-  - 提交最终答案表格并结束当前任务
-  - 输入：`columns`、`rows`
+| 工具 | 作用 | 输入 |
+| --- | --- | --- |
+| `list_context` | 列出 `context/` 下的文件和目录。 | `max_depth` |
+| `read_csv` | 读取 CSV 预览。 | `path`、`max_rows` |
+| `read_json` | 读取 JSON 预览。 | `path`、`max_chars` |
+| `read_doc` | 读取文本文档预览。 | `path`、`max_chars` |
+| `inspect_sqlite_schema` | 查看 SQLite / DB 文件中的表结构。 | `path` |
+| `execute_context_sql` | 对 `context/` 内 SQLite / DB 文件执行只读 SQL。 | `path`、`sql`、`limit` |
+| `execute_python` | 在任务 `context/` 目录内执行任意 Python 代码。 | `code` |
+| `answer` | 提交最终答案表格并结束当前任务。 | `columns`、`rows` |
 
 所有文件路径都必须是相对于任务 `context/` 目录的相对路径。
 
@@ -236,19 +175,13 @@ artifacts/runs/<run_id>/summary.json
 
 ## 主要模块
 
-- `src/data_agent_baseline/benchmark/dataset.py`
-  - 公开数据集加载器
-- `src/data_agent_baseline/tools/filesystem.py`
-  - `list_context`、`read_csv`、`read_json`、`read_doc`
-- `src/data_agent_baseline/tools/python_exec.py`
-  - `execute_python`
-- `src/data_agent_baseline/tools/sqlite.py`
-  - `inspect_sqlite_schema`、`execute_context_sql`
-- `src/data_agent_baseline/tools/registry.py`
-  - 工具注册与终止型 `answer`
-- `src/data_agent_baseline/agents/prompt.py`
-  - system prompt、task prompt、observation prompt
-- `src/data_agent_baseline/agents/react.py`
-  - 基于 JSON action 协议的 ReAct runtime
-- `src/data_agent_baseline/run/runner.py`
-  - 单任务和批量运行逻辑
+| 模块 | 责任 |
+| --- | --- |
+| `src/data_agent_baseline/benchmark/dataset.py` | 公开数据集加载器 |
+| `src/data_agent_baseline/tools/filesystem.py` | `list_context`、`read_csv`、`read_json`、`read_doc` |
+| `src/data_agent_baseline/tools/python_exec.py` | `execute_python` |
+| `src/data_agent_baseline/tools/sqlite.py` | `inspect_sqlite_schema`、`execute_context_sql` |
+| `src/data_agent_baseline/tools/registry.py` | 工具注册与终止型 `answer` |
+| `src/data_agent_baseline/agents/prompt.py` | system prompt、task prompt、observation prompt |
+| `src/data_agent_baseline/agents/react.py` | 基于 JSON action 协议的 ReAct runtime |
+| `src/data_agent_baseline/run/runner.py` | 单任务和批量运行逻辑 |

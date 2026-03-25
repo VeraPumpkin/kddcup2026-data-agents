@@ -1,12 +1,65 @@
+<div align="center">
+
 # DABench ReAct Baseline
 
 English | [中文](README.zh.md)
 
-This repository contains the public ReAct baseline for DABench. It reads tasks from the released demo dataset and produces `prediction.csv` files for downstream evaluation.
+[![Official Website](https://img.shields.io/badge/Official%20Website-Visit%20KDD%20Cup%202026-0ea5e9?style=for-the-badge&logo=googlechrome&logoColor=white&labelColor=0f172a)](https://kdd2026.kdd.org/)
+[![Demo Dataset](https://img.shields.io/badge/Demo%20Dataset-Download%20Phase%201-f59e0b?style=for-the-badge&logo=googledrive&logoColor=white&labelColor=0f172a)](https://drive.google.com/file/d/1n8vrRIjhVz0STj1DYZ7fSNL2JHtswu4J/view?usp=share_link)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=0f172a)](https://discord.gg/vRr7uyK9)
+
+</div>
+
+> ReAct baseline for the public DABench demo set. The repository reads tasks from `data/public/input/` and writes predictions for downstream evaluation.
+
+## KDD Cup Context
+
+| Item | Value |
+| --- | --- |
+| Competition | KDD Cup 2026: Data Agents for Complex Data Analysis |
+| Stage | Phase 1 public demo baseline |
+| Task | Autonomous data analysis over heterogeneous task contexts |
+| Evaluation | Public demo uses `data/public/output/`; hidden test sets provide `input/` only |
+
+## At a Glance
+
+| Dataset input | `data/public/input/` |
+| Public demo ground truth | `data/public/output/task_<id>/gold.csv` |
+| Hidden test data | `input/` only, no `output/` |
+| Entry command | `uv run dabench <command> --config PATH` |
+| Default run output | `artifacts/runs/` |
+
+## Quick Start
+
+1. Install `uv` by following the official guide:
+   - https://docs.astral.sh/uv/getting-started/installation/
+2. On macOS and Linux, the standalone installer is:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+3. Install project dependencies:
+
+   ```bash
+   uv sync
+   ```
+
+4. Confirm the dataset root is visible:
+
+   ```bash
+   uv run dabench status --config configs/react_baseline.example.yaml
+   ```
+
+5. Run the baseline:
+
+   ```bash
+   uv run dabench run-benchmark --config configs/react_baseline.example.yaml
+   ```
 
 ## Dataset
 
-The public demo dataset is expected at `data/public/input/`. Each task directory follows this structure:
+The public demo dataset lives under `data/public/input/`. Each task directory follows this structure:
 
 ```text
 data/public/input/task_<id>/
@@ -14,7 +67,8 @@ data/public/input/task_<id>/
 └── context/
 ```
 
-Ground-truth files for the public demo dataset are stored separately under `data/public/output/task_<id>/gold.csv`. Hidden test sets only provide `input/` and do not include `output/`.
+The corresponding public demo answers live separately under `data/public/output/task_<id>/gold.csv`.
+Hidden test sets only include `input/`, so there is no `output/` directory there.
 
 `task.json` contains:
 
@@ -28,12 +82,6 @@ The `context/` directory may contain one or more of:
 - JSON files
 - SQLite / DB files
 - Text documents
-
-## Install
-
-```bash
-uv sync
-```
 
 ## Configuration
 
@@ -59,157 +107,48 @@ run:
 
 Config fields:
 
-- `dataset.root_path`
-  - Root directory of the public demo `input/` dataset
-  - Relative paths are resolved from the project root
-- `agent.model`
-  - Model name
-- `agent.api_base`
-  - OpenAI-compatible API base URL
-- `agent.api_key`
-  - API key, read directly from the config file
-- `agent.max_steps`
-  - Maximum ReAct steps per task
-- `agent.temperature`
-  - Sampling temperature
-- `run.output_dir`
-  - Output directory for run artifacts
-- `run.run_id`
-  - Optional run directory name
-  - Defaults to a UTC timestamp if omitted
-  - Must be a single directory name; existing run directories are rejected
-- `run.max_workers`
-  - Parallel worker count for `run-benchmark`
-- `run.task_timeout_seconds`
-  - Maximum wall-clock time per task
-  - Set to `0` or a negative value to disable the task-level timeout
+| Field | Meaning |
+| --- | --- |
+| `dataset.root_path` | Root directory of the public demo `input/` dataset. Relative paths are resolved from the project root. |
+| `agent.model` | Model name. |
+| `agent.api_base` | OpenAI-compatible API base URL. |
+| `agent.api_key` | API key, read directly from the config file. |
+| `agent.max_steps` | Maximum ReAct steps per task. |
+| `agent.temperature` | Sampling temperature. |
+| `run.output_dir` | Output directory for run artifacts. |
+| `run.run_id` | Optional run directory name. Defaults to a UTC timestamp if omitted. Must be a single directory name; existing run directories are rejected. |
+| `run.max_workers` | Parallel worker count for `run-benchmark`. |
+| `run.task_timeout_seconds` | Maximum wall-clock time per task. Set to `0` or a negative value to disable the task-level timeout. |
 
 ## CLI
-
-The CLI entrypoint is:
 
 ```bash
 uv run dabench <command> --config PATH [options]
 ```
 
-### `status`
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `status` | Show project paths, config path, dataset root, and public task counts. | `uv run dabench status --config configs/react_baseline.example.yaml` |
+| `inspect-task` | Show task metadata and list accessible files under `context/`. | `uv run dabench inspect-task task_1 --config configs/react_baseline.local.yaml` |
+| `run-task` | Run the baseline on one task and write outputs. | `uv run dabench run-task task_1 --config configs/react_baseline.local.yaml` |
+| `run-benchmark` | Run the baseline across the public dataset. | `uv run dabench run-benchmark --config configs/react_baseline.local.yaml` |
 
-Purpose:
-
-- Show project paths
-- Show the active config path
-- Show the active dataset root
-- Show public task counts
-
-Usage:
-
-```bash
-uv run dabench status --config configs/react_baseline.example.yaml
-```
-
-Parameters:
-
-- `--config PATH`
-  - YAML config file path
-  - Required
-
-### `inspect-task`
-
-Purpose:
-
-- Show a task's metadata
-- List accessible files under `context/`
-
-Usage:
-
-```bash
-uv run dabench inspect-task task_1 --config configs/react_baseline.local.yaml
-```
-
-Parameters:
-
-- `task_id`
-  - Required positional argument
-- `--config PATH`
-  - YAML config file path
-  - Required
-
-### `run-task`
-
-Purpose:
-
-- Run the ReAct baseline on one task
-- Execute tools and write outputs
-
-Usage:
-
-```bash
-uv run dabench run-task task_1 --config configs/react_baseline.local.yaml
-```
-
-Parameters:
-
-- `task_id`
-  - Required positional argument
-- `--config PATH`
-  - YAML config file path
-  - Required
-
-### `run-benchmark`
-
-Purpose:
-
-- Run the baseline across the public dataset
-- For the public demo set, compare against the separate `data/public/output/` ground truth
-- Write per-task outputs plus a run summary
-- Show a compact live progress bar with success/failure counts and throughput
-
-Usage:
-
-```bash
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml --limit 5
-uv run dabench run-benchmark --config configs/react_baseline.local.yaml --limit 20
-```
-
-Parameters:
-
-- `--config PATH`
-  - YAML config file path
-  - Required
-- `--limit N`
-  - Maximum number of tasks to run
+`run-benchmark` also supports `--limit N` to cap the number of tasks.
 
 ## Tools
 
 The baseline exposes these tools to the model:
 
-- `list_context`
-  - List files and directories under `context/`
-  - Inputs: `max_depth`
-- `read_csv`
-  - Read a CSV preview
-  - Inputs: `path`, `max_rows`
-- `read_json`
-  - Read a JSON preview
-  - Inputs: `path`, `max_chars`
-- `read_doc`
-  - Read a text document preview
-  - Inputs: `path`, `max_chars`
-- `inspect_sqlite_schema`
-  - Inspect tables in a SQLite / DB file
-  - Inputs: `path`
-- `execute_context_sql`
-  - Execute read-only SQL against a SQLite / DB file in `context/`
-  - Inputs: `path`, `sql`, `limit`
-- `execute_python`
-  - Execute arbitrary Python code inside the task `context/` directory
-  - Inputs: `code`
-  - Fixed timeout: `30` seconds
-  - Returns captured stdout as `output`
-- `answer`
-  - Submit the final answer table and terminate the task
-  - Inputs: `columns`, `rows`
+| Tool | Purpose | Inputs |
+| --- | --- | --- |
+| `list_context` | List files and directories under `context/`. | `max_depth` |
+| `read_csv` | Read a CSV preview. | `path`, `max_rows` |
+| `read_json` | Read a JSON preview. | `path`, `max_chars` |
+| `read_doc` | Read a text document preview. | `path`, `max_chars` |
+| `inspect_sqlite_schema` | Inspect tables in a SQLite / DB file. | `path` |
+| `execute_context_sql` | Execute read-only SQL against a SQLite / DB file in `context/`. | `path`, `sql`, `limit` |
+| `execute_python` | Execute arbitrary Python code inside the task `context/` directory. | `code` |
+| `answer` | Submit the final answer table and terminate the task. | `columns`, `rows` |
 
 All file paths passed to tools must be relative to the task `context/` directory.
 
@@ -236,19 +175,13 @@ artifacts/runs/<run_id>/summary.json
 
 ## Main Modules
 
-- `src/data_agent_baseline/benchmark/dataset.py`
-  - Public dataset loader
-- `src/data_agent_baseline/tools/filesystem.py`
-  - `list_context`, `read_csv`, `read_json`, `read_doc`
-- `src/data_agent_baseline/tools/python_exec.py`
-  - `execute_python`
-- `src/data_agent_baseline/tools/sqlite.py`
-  - `inspect_sqlite_schema`, `execute_context_sql`
-- `src/data_agent_baseline/tools/registry.py`
-  - Tool registration and terminal `answer`
-- `src/data_agent_baseline/agents/prompt.py`
-  - System prompt, task prompt, observation prompt
-- `src/data_agent_baseline/agents/react.py`
-  - ReAct runtime with JSON action protocol
-- `src/data_agent_baseline/run/runner.py`
-  - Single-task and benchmark execution
+| Module | Responsibility |
+| --- | --- |
+| `src/data_agent_baseline/benchmark/dataset.py` | Public dataset loader |
+| `src/data_agent_baseline/tools/filesystem.py` | `list_context`, `read_csv`, `read_json`, `read_doc` |
+| `src/data_agent_baseline/tools/python_exec.py` | `execute_python` |
+| `src/data_agent_baseline/tools/sqlite.py` | `inspect_sqlite_schema`, `execute_context_sql` |
+| `src/data_agent_baseline/tools/registry.py` | Tool registration and terminal `answer` |
+| `src/data_agent_baseline/agents/prompt.py` | System prompt, task prompt, observation prompt |
+| `src/data_agent_baseline/agents/react.py` | ReAct runtime with JSON action protocol |
+| `src/data_agent_baseline/run/runner.py` | Single-task and benchmark execution |
