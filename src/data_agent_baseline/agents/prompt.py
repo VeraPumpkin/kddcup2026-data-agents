@@ -18,6 +18,8 @@ Rules:
 5. Always return exactly one JSON object with keys `thought`, `action`, and `action_input`.
 6. Always wrap that JSON object in exactly one fenced code block that starts with ```json and ends with ```.
 7. Do not output any text before or after the fenced JSON block.
+8. When joining or merging multiple tables/files, strictly perform an INNER JOIN to ensure data consistency, and drop any resulting rows that contain null, NaN, or empty values in the requested output columns.
+9. When outputting the final answer, copy all IDs EXACTLY as they appear in the original data. Do NOT truncate, drop trailing digits, or modify the IDs in any way.
 
 Keep reasoning concise and grounded in the observed data.
 """.strip()
