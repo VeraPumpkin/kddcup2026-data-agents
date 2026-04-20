@@ -15,6 +15,7 @@ from data_agent_baseline.agents.model import OpenAIModelAdapter
 from data_agent_baseline.agents.react import ReActAgent, ReActAgentConfig
 from data_agent_baseline.benchmark.dataset import DABenchPublicDataset
 from data_agent_baseline.config import AppConfig
+from data_agent_baseline.semantic import build_semantic_layer_for_task, render_semantic_layer_summary
 from data_agent_baseline.tools.registry import ToolRegistry, create_default_tool_registry
 
 
@@ -70,6 +71,18 @@ def build_model_adapter(config: AppConfig):
     )
 
 
+def _build_semantic_context(semantic_layer) -> dict[str, object]:
+    return {
+        "concept_count": len(semantic_layer.concepts),
+        "semantic_link_count": len(semantic_layer.semantic_links),
+        "value_mapping_count": sum(len(concept.value_mappings) for concept in semantic_layer.concepts),
+        "join_candidate_count": len(semantic_layer.join_candidates),
+        "retrieved_chunk_count": len(semantic_layer.retrieved_knowledge_chunks),
+        "schema_profile_count": len(semantic_layer.schema_profiles),
+        "warning_count": len(semantic_layer.warnings),
+    }
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
@@ -99,6 +112,8 @@ def _run_single_task_core(
     config: AppConfig,
     model=None,
     tools: ToolRegistry | None = None,
+    semantic_summary: str | None = None,
+    semantic_context: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     public_dataset = DABenchPublicDataset(config.dataset.root_path)
     task = public_dataset.get_task(task_id)
@@ -107,17 +122,30 @@ def _run_single_task_core(
         model=model or build_model_adapter(config),
         tools=tools or create_default_tool_registry(),
         config=ReActAgentConfig(max_steps=config.agent.max_steps),
+        semantic_summary=semantic_summary,
+        semantic_context=semantic_context,
     )
     run_result = agent.run(task)
     return run_result.to_dict()
 
 
-def _run_single_task_in_subprocess(task_id: str, config: AppConfig, queue: multiprocessing.Queue[Any]) -> None:
+def _run_single_task_in_subprocess(
+    task_id: str,
+    config: AppConfig,
+    queue: multiprocessing.Queue[Any],
+    semantic_summary: str | None,
+    semantic_context: dict[str, object] | None,
+) -> None:
     try:
         queue.put(
             {
                 "ok": True,
-                "run_result": _run_single_task_core(task_id=task_id, config=config),
+                "run_result": _run_single_task_core(
+                    task_id=task_id,
+                    config=config,
+                    semantic_summary=semantic_summary,
+                    semantic_context=semantic_context,
+                ),
             }
         )
     except BaseException as exc:  # noqa: BLE001
@@ -129,15 +157,26 @@ def _run_single_task_in_subprocess(task_id: str, config: AppConfig, queue: multi
         )
 
 
-def _run_single_task_with_timeout(*, task_id: str, config: AppConfig) -> dict[str, Any]:
+def _run_single_task_with_timeout(
+    *,
+    task_id: str,
+    config: AppConfig,
+    semantic_summary: str | None = None,
+    semantic_context: dict[str, object] | None = None,
+) -> dict[str, Any]:
     timeout_seconds = config.run.task_timeout_seconds
     if timeout_seconds <= 0:
-        return _run_single_task_core(task_id=task_id, config=config)
+        return _run_single_task_core(
+            task_id=task_id,
+            config=config,
+            semantic_summary=semantic_summary,
+            semantic_context=semantic_context,
+        )
 
     queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=_run_single_task_in_subprocess,
-        args=(task_id, config, queue),
+        args=(task_id, config, queue, semantic_summary, semantic_context),
     )
     process.start()
     process.join(timeout_seconds)
@@ -200,10 +239,43 @@ def run_single_task(
     tools: ToolRegistry | None = None,
 ) -> TaskRunArtifacts:
     started_at = perf_counter()
+    public_dataset = DABenchPublicDataset(config.dataset.root_path)
+    task = public_dataset.get_task(task_id)
+    task_output_dir = run_output_dir / task_id
+    task_output_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_layer = build_semantic_layer_for_task(
+        task.task_dir,
+        task.question,
+        output_dir=task_output_dir,
+        embedding_config={
+            "model_name_or_path": config.embedding.model_name_or_path,
+            "device": config.embedding.device,
+            "chunk_target_chars": config.embedding.chunk_target_chars,
+            "chunk_overlap_chars": config.embedding.chunk_overlap_chars,
+            "retrieval_top_k": config.embedding.retrieval_top_k,
+            "query_instruction": config.embedding.query_instruction,
+        },
+    )
+    semantic_summary = render_semantic_layer_summary(semantic_layer)
+    semantic_context = _build_semantic_context(semantic_layer)
+
     if model is None and tools is None:
-        run_result = _run_single_task_with_timeout(task_id=task_id, config=config)
+        run_result = _run_single_task_with_timeout(
+            task_id=task_id,
+            config=config,
+            semantic_summary=semantic_summary,
+            semantic_context=semantic_context,
+        )
     else:
-        run_result = _run_single_task_core(task_id=task_id, config=config, model=model, tools=tools)
+        run_result = _run_single_task_core(
+            task_id=task_id,
+            config=config,
+            model=model,
+            tools=tools,
+            semantic_summary=semantic_summary,
+            semantic_context=semantic_context,
+        )
     run_result["e2e_elapsed_seconds"] = round(perf_counter() - started_at, 3)
     return _write_task_outputs(task_id, run_output_dir, run_result)
 

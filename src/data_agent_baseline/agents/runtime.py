@@ -25,6 +25,9 @@ class AgentRuntimeState:
     steps: list[StepRecord] = field(default_factory=list)
     answer: AnswerTable | None = None
     failure_reason: str | None = None
+    semantic_layer_present: bool = False
+    raw_read_denials: int = 0
+    semantic_coverage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

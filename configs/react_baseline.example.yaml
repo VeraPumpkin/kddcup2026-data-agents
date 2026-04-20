@@ -13,3 +13,11 @@ run:
   run_id: example_run_id
   max_workers: 8
   task_timeout_seconds: 600
+
+embedding:
+  model_name_or_path: BAAI/bge-small-en-v1.5
+  device: cpu
+  chunk_target_chars: 900
+  chunk_overlap_chars: 120
+  retrieval_top_k: 5
+  query_instruction: "Represent this sentence for searching relevant passages:"

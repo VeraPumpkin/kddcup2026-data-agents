@@ -148,6 +148,7 @@ def create_default_tool_registry() -> ToolRegistry:
             description=(
                 "Execute arbitrary Python code with the task context directory as the "
                 "working directory. The tool returns the code's captured stdout as `output`. "
+                "The input must be a JSON object with a `code` field containing the Python code to execute. "
                 f"The execution timeout is fixed at {EXECUTE_PYTHON_TIMEOUT_SECONDS} seconds."
             ),
             input_schema={
@@ -161,23 +162,50 @@ def create_default_tool_registry() -> ToolRegistry:
         ),
         "list_context": ToolSpec(
             name="list_context",
-            description="List files and directories available under context.",
-            input_schema={"max_depth": 4},
+            description=(
+                "Fallback-only discovery tool. Use only when semantic-layer preprocessing did not already provide enough "
+                "environment coverage or when you truly need to locate an uncovered asset."
+            ),
+            input_schema={"max_depth": 4, "reason": "semantic_gap | locate_uncovered_asset"},
         ),
         "read_csv": ToolSpec(
             name="read_csv",
-            description="Read a preview of a CSV file inside context.",
-            input_schema={"path": "relative/path/to/file.csv", "max_rows": 20},
+            description=(
+                "Fallback-only tool. Read a targeted preview of a CSV file only when semantic-layer coverage is insufficient, "
+                "when you need exact evidence, or when you must validate a risky mapping."
+            ),
+            input_schema={
+                "path": "relative/path/to/file.csv",
+                "max_rows": 20,
+                "reason": "verify_mapping | extract_exact_evidence | semantic_gap | read_uncovered_field",
+                "scope": "targeted | section_only | local_preview",
+            },
         ),
         "read_doc": ToolSpec(
             name="read_doc",
-            description="Read a text-like document inside context.",
-            input_schema={"path": "relative/path/to/file.md", "max_chars": 4000},
+            description=(
+                "Fallback-only tool. Read a narrow document snippet only when semantic-layer coverage is insufficient "
+                "or exact wording must be extracted."
+            ),
+            input_schema={
+                "path": "relative/path/to/file.md",
+                "max_chars": 4000,
+                "reason": "verify_mapping | extract_exact_evidence | semantic_gap | read_uncovered_field",
+                "scope": "targeted | section_only | local_preview",
+            },
         ),
         "read_json": ToolSpec(
             name="read_json",
-            description="Read a preview of a JSON file inside context.",
-            input_schema={"path": "relative/path/to/file.json", "max_chars": 4000},
+            description=(
+                "Fallback-only tool. Read a targeted JSON preview only when semantic-layer coverage is insufficient "
+                "or a missing field or exact evidence must be inspected."
+            ),
+            input_schema={
+                "path": "relative/path/to/file.json",
+                "max_chars": 4000,
+                "reason": "verify_mapping | extract_exact_evidence | semantic_gap | read_uncovered_field",
+                "scope": "targeted | section_only | local_preview",
+            },
         ),
     }
     handlers = {
