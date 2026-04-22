@@ -37,3 +37,9 @@ configs/*
 # OS / notebook noise
 .DS_Store
 .ipynb_checkpoints/
+
+# Local embedding_model/
+embedding_model/*
+*.tar.gz
+summary.md
+*.zip

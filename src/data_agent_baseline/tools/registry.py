@@ -6,13 +6,9 @@ from typing import Any, Callable
 from data_agent_baseline.benchmark.schema import AnswerTable, PublicTask
 from data_agent_baseline.tools.filesystem import (
     list_context_tree,
-    read_csv_preview,
-    read_doc_preview,
-    read_json_preview,
-    resolve_context_path,
 )
 from data_agent_baseline.tools.python_exec import execute_python_code
-from data_agent_baseline.tools.sqlite import execute_read_only_sql, inspect_sqlite_schema
+from data_agent_baseline.tools.structured_context import StructuredContextStore
 
 EXECUTE_PYTHON_TIMEOUT_SECONDS = 30
 
@@ -32,45 +28,42 @@ class ToolExecutionResult:
     answer: AnswerTable | None = None
 
 
-ToolHandler = Callable[[PublicTask, dict[str, Any]], ToolExecutionResult]
+ToolHandler = Callable[
+    [PublicTask, dict[str, Any], StructuredContextStore | None],
+    ToolExecutionResult,
+]
 
 
-def _list_context(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
+def _list_context(
+    task: PublicTask,
+    action_input: dict[str, Any],
+    structured_store: StructuredContextStore | None = None,
+) -> ToolExecutionResult:
     max_depth = int(action_input.get("max_depth", 4))
     return ToolExecutionResult(ok=True, content=list_context_tree(task, max_depth=max_depth))
 
 
-def _read_csv(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
-    path = str(action_input["path"])
-    max_rows = int(action_input.get("max_rows", 20))
-    return ToolExecutionResult(ok=True, content=read_csv_preview(task, path, max_rows=max_rows))
-
-
-def _read_json(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
-    path = str(action_input["path"])
-    max_chars = int(action_input.get("max_chars", 4000))
-    return ToolExecutionResult(ok=True, content=read_json_preview(task, path, max_chars=max_chars))
-
-
-def _read_doc(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
-    path = str(action_input["path"])
-    max_chars = int(action_input.get("max_chars", 4000))
-    return ToolExecutionResult(ok=True, content=read_doc_preview(task, path, max_chars=max_chars))
-
-
-def _inspect_sqlite_schema(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
-    path = resolve_context_path(task, str(action_input["path"]))
-    return ToolExecutionResult(ok=True, content=inspect_sqlite_schema(path))
-
-
-def _execute_context_sql(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
-    path = resolve_context_path(task, str(action_input["path"]))
+def _execute_duckdb_sql(
+    task: PublicTask,
+    action_input: dict[str, Any],
+    structured_store: StructuredContextStore | None = None,
+) -> ToolExecutionResult:
+    owns_store = structured_store is None
+    store = structured_store or StructuredContextStore.from_task(task)
     sql = str(action_input["sql"])
     limit = int(action_input.get("limit", 200))
-    return ToolExecutionResult(ok=True, content=execute_read_only_sql(path, sql, limit=limit))
+    try:
+        return ToolExecutionResult(ok=True, content=store.query(sql, limit=limit))
+    finally:
+        if owns_store:
+            store.close()
 
 
-def _execute_python(task: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
+def _execute_python(
+    task: PublicTask,
+    action_input: dict[str, Any],
+    structured_store: StructuredContextStore | None = None,
+) -> ToolExecutionResult:
     code = str(action_input["code"])
     content = execute_python_code(
         context_root=task.context_dir,
@@ -80,7 +73,11 @@ def _execute_python(task: PublicTask, action_input: dict[str, Any]) -> ToolExecu
     return ToolExecutionResult(ok=bool(content.get("success")), content=content)
 
 
-def _answer(_: PublicTask, action_input: dict[str, Any]) -> ToolExecutionResult:
+def _answer(
+    _: PublicTask,
+    action_input: dict[str, Any],
+    structured_store: StructuredContextStore | None = None,
+) -> ToolExecutionResult:
     columns = action_input.get("columns")
     rows = action_input.get("rows")
     if not isinstance(columns, list) or not columns or not all(isinstance(item, str) for item in columns):
@@ -122,10 +119,17 @@ class ToolRegistry:
             lines.append(f"  input_schema: {spec.input_schema}")
         return "\n".join(lines)
 
-    def execute(self, task: PublicTask, action: str, action_input: dict[str, Any]) -> ToolExecutionResult:
+    def execute(
+        self,
+        task: PublicTask,
+        action: str,
+        action_input: dict[str, Any],
+        *,
+        structured_store: StructuredContextStore | None = None,
+    ) -> ToolExecutionResult:
         if action not in self.handlers:
             raise KeyError(f"Unknown tool: {action}")
-        return self.handlers[action](task, action_input)
+        return self.handlers[action](task, action_input, structured_store)
 
 
 def create_default_tool_registry() -> ToolRegistry:
@@ -134,14 +138,48 @@ def create_default_tool_registry() -> ToolRegistry:
             name="answer",
             description="Submit the final answer table. This is the only valid terminating action.",
             input_schema={
-                "columns": ["column_name"],
-                "rows": [["value_1"]],
+                "type": "object",
+                "properties": {
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    },
+                    "rows": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {},
+                        },
+                    },
+                },
+                "required": ["columns", "rows"],
+                "additionalProperties": False,
             },
         ),
-        "execute_context_sql": ToolSpec(
-            name="execute_context_sql",
-            description="Run a read-only SQL query against a sqlite/db file inside context.",
-            input_schema={"path": "relative/path/to/file.sqlite", "sql": "SELECT ...", "limit": 200},
+        "execute_duckdb_sql": ToolSpec(
+            name="execute_duckdb_sql",
+            description=(
+                "Run read-only SQL against the per-task DuckDB store containing registered "
+                "CSV tables, JSON records tables, SQLite/DB tables, and doc annotation tables."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "Read-only SQL statement starting with SELECT, WITH, PRAGMA, DESCRIBE, or SHOW.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of rows to return.",
+                        "default": 200,
+                        "minimum": 1,
+                    },
+                },
+                "required": ["sql"],
+                "additionalProperties": False,
+            },
         ),
         "execute_python": ToolSpec(
             name="execute_python",
@@ -151,43 +189,21 @@ def create_default_tool_registry() -> ToolRegistry:
                 f"The execution timeout is fixed at {EXECUTE_PYTHON_TIMEOUT_SECONDS} seconds."
             ),
             input_schema={
-                "code": "import os\nprint(sorted(os.listdir('.')))",
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute inside a copy of the task context.",
+                    },
+                },
+                "required": ["code"],
+                "additionalProperties": False,
             },
-        ),
-        "inspect_sqlite_schema": ToolSpec(
-            name="inspect_sqlite_schema",
-            description="Inspect tables and columns in a sqlite/db file inside context.",
-            input_schema={"path": "relative/path/to/file.sqlite"},
-        ),
-        "list_context": ToolSpec(
-            name="list_context",
-            description="List files and directories available under context.",
-            input_schema={"max_depth": 4},
-        ),
-        "read_csv": ToolSpec(
-            name="read_csv",
-            description="Read a preview of a CSV file inside context.",
-            input_schema={"path": "relative/path/to/file.csv", "max_rows": 20},
-        ),
-        "read_doc": ToolSpec(
-            name="read_doc",
-            description="Read a text-like document inside context.",
-            input_schema={"path": "relative/path/to/file.md", "max_chars": 4000},
-        ),
-        "read_json": ToolSpec(
-            name="read_json",
-            description="Read a preview of a JSON file inside context.",
-            input_schema={"path": "relative/path/to/file.json", "max_chars": 4000},
         ),
     }
     handlers = {
         "answer": _answer,
-        "execute_context_sql": _execute_context_sql,
+        "execute_duckdb_sql": _execute_duckdb_sql,
         "execute_python": _execute_python,
-        "inspect_sqlite_schema": _inspect_sqlite_schema,
-        "list_context": _list_context,
-        "read_csv": _read_csv,
-        "read_doc": _read_doc,
-        "read_json": _read_json,
     }
     return ToolRegistry(specs=specs, handlers=handlers)

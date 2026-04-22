@@ -4,6 +4,7 @@ import contextlib
 import io
 import multiprocessing
 import os
+import shutil
 import sys
 import tempfile
 import traceback
@@ -71,22 +72,26 @@ def _read_captured_stream(path: Path) -> str:
 
 def _run_python_code(
     context_root: str,
+    work_dir: str,
     code: str,
     stdout_path: str,
     stderr_path: str,
     queue: multiprocessing.Queue[Any],
 ) -> None:
+    resolved_context_root = Path(context_root).resolve()
+    resolved_work_dir = Path(work_dir).resolve()
     namespace: dict[str, Any] = {
         "__builtins__": __builtins__,
         "__name__": "__main__",
-        "context_root": context_root,
+        "context_root": resolved_work_dir.as_posix(),
         "Path": Path,
     }
     resolved_stdout_path = Path(stdout_path)
     resolved_stderr_path = Path(stderr_path)
 
     try:
-        os.chdir(context_root)
+        _copy_context_into_work_dir(resolved_context_root, resolved_work_dir)
+        os.chdir(resolved_work_dir)
         with _capture_process_streams(resolved_stdout_path, resolved_stderr_path):
             exec(code, namespace, namespace)
         queue.put({"success": True})
@@ -100,11 +105,25 @@ def _run_python_code(
         )
 
 
+def _copy_context_into_work_dir(context_root: Path, work_dir: Path) -> None:
+    for item in context_root.iterdir():
+        target = work_dir / item.name
+        if target.exists():
+            continue
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+
+
 def execute_python_code(context_root: Path, code: str, *, timeout_seconds: int = 30) -> dict[str, Any]:
     resolved_context_root = context_root.resolve()
     with tempfile.TemporaryDirectory() as temp_dir:
-        stdout_path = Path(temp_dir) / "stdout.txt"
-        stderr_path = Path(temp_dir) / "stderr.txt"
+        temp_root = Path(temp_dir)
+        work_dir = temp_root / "work"
+        work_dir.mkdir()
+        stdout_path = temp_root / "stdout.txt"
+        stderr_path = temp_root / "stderr.txt"
         stdout_path.write_text("")
         stderr_path.write_text("")
 
@@ -113,6 +132,7 @@ def execute_python_code(context_root: Path, code: str, *, timeout_seconds: int =
             target=_run_python_code,
             args=(
                 resolved_context_root.as_posix(),
+                work_dir.as_posix(),
                 code,
                 stdout_path.as_posix(),
                 stderr_path.as_posix(),

@@ -16,7 +16,12 @@ from rich.table import Table
 
 from data_agent_baseline.benchmark.dataset import DABenchPublicDataset
 from data_agent_baseline.config import load_app_config
-from data_agent_baseline.run.runner import TaskRunArtifacts, create_run_output_dir, run_benchmark, run_single_task
+from data_agent_baseline.run.runner import (
+    TaskRunArtifacts,
+    create_single_task_run_output_dir,
+    run_benchmark,
+    run_single_task,
+)
 from data_agent_baseline.tools.filesystem import list_context_tree
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -138,7 +143,11 @@ def run_task_command(
     """Run the ReAct baseline on one task."""
     app_config = load_app_config(config)
     try:
-        _, run_output_dir = create_run_output_dir(app_config.run.output_dir, run_id=app_config.run.run_id)
+        _, run_output_dir = create_single_task_run_output_dir(
+            app_config.run.output_dir,
+            task_id=task_id,
+            run_id=app_config.run.run_id,
+        )
     except (ValueError, FileExistsError) as exc:
         raise typer.BadParameter(str(exc), param_hint="run.run_id") from exc
     artifacts = run_single_task(task_id=task_id, config=app_config, run_output_dir=run_output_dir)
@@ -157,12 +166,21 @@ def run_task_command(
 def run_benchmark_command(
     config: Path = typer.Option(..., exists=True, dir_okay=False, help="YAML config path."),
     limit: int | None = typer.Option(None, min=1, help="Maximum number of tasks to run."),
+    random_sample: int | None = typer.Option(None, min=1, help="Randomly sample N tasks to run."),
+    seed: int | None = typer.Option(None, help="Random seed for --random-sample."),
 ) -> None:
     """Run the ReAct baseline on multiple tasks from the config selection."""
+    if limit is not None and random_sample is not None:
+        raise typer.BadParameter(
+            "--limit and --random-sample are mutually exclusive.",
+            param_hint="--random-sample",
+        )
     app_config = load_app_config(config)
     dataset = DABenchPublicDataset(app_config.dataset.root_path)
     task_total = len(dataset.iter_tasks())
-    if limit is not None:
+    if random_sample is not None:
+        task_total = min(task_total, random_sample)
+    elif limit is not None:
         task_total = min(task_total, limit)
     effective_workers = app_config.run.max_workers
 
@@ -233,6 +251,8 @@ def run_benchmark_command(
             run_output_dir, artifacts = run_benchmark(
                 config=app_config,
                 limit=limit,
+                random_sample=random_sample,
+                seed=seed,
                 progress_callback=on_task_complete,
             )
         except (ValueError, FileExistsError) as exc:

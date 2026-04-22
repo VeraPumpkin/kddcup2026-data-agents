@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-
 from data_agent_baseline.benchmark.schema import PublicTask
 
 

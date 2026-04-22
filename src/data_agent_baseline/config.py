@@ -86,4 +86,8 @@ def load_app_config(config_path: Path) -> AppConfig:
         max_workers=int(run_payload.get("max_workers", run_defaults.max_workers)),
         task_timeout_seconds=int(run_payload.get("task_timeout_seconds", run_defaults.task_timeout_seconds)),
     )
-    return AppConfig(dataset=dataset_config, agent=agent_config, run=run_config)
+    return AppConfig(
+        dataset=dataset_config,
+        agent=agent_config,
+        run=run_config,
+    )

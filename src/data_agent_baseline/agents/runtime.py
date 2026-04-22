@@ -12,9 +12,10 @@ class StepRecord:
     thought: str
     action: str
     action_input: dict[str, Any]
-    raw_response: str
+    raw_response: Any
     observation: dict[str, Any]
     ok: bool
+    agent_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -33,6 +34,7 @@ class AgentRunResult:
     answer: AnswerTable | None
     steps: list[StepRecord]
     failure_reason: str | None
+    remaining_steps: int = 0
 
     @property
     def succeeded(self) -> bool:
@@ -44,5 +46,6 @@ class AgentRunResult:
             "answer": self.answer.to_dict() if self.answer is not None else None,
             "steps": [step.to_dict() for step in self.steps],
             "failure_reason": self.failure_reason,
+            "remaining_steps": self.remaining_steps,
             "succeeded": self.succeeded,
         }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import multiprocessing
+import queue as queue_module
+import random
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from time import perf_counter
 from typing import Any
 
 from data_agent_baseline.agents.model import OpenAIModelAdapter
-from data_agent_baseline.agents.react import ReActAgent, ReActAgentConfig
+from data_agent_baseline.agents.orchestrator import MultiAgentOrchestrator
 from data_agent_baseline.benchmark.dataset import DABenchPublicDataset
 from data_agent_baseline.config import AppConfig
 from data_agent_baseline.tools.registry import ToolRegistry, create_default_tool_registry
@@ -61,6 +63,21 @@ def create_run_output_dir(output_root: Path, *, run_id: str | None = None) -> tu
     return effective_run_id, run_output_dir
 
 
+def create_single_task_run_output_dir(
+    output_root: Path,
+    *,
+    task_id: str,
+    run_id: str | None = None,
+) -> tuple[str, Path]:
+    effective_run_id = resolve_run_id(run_id)
+    run_output_dir = output_root / effective_run_id
+    task_output_dir = run_output_dir / task_id
+    if task_output_dir.exists():
+        raise FileExistsError(f"Task output already exists: {task_output_dir}")
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+    return effective_run_id, run_output_dir
+
+
 def build_model_adapter(config: AppConfig):
     return OpenAIModelAdapter(
         model=config.agent.model,
@@ -89,6 +106,7 @@ def _failure_run_result_payload(task_id: str, failure_reason: str) -> dict[str, 
         "answer": None,
         "steps": [],
         "failure_reason": failure_reason,
+        "remaining_steps": 0,
         "succeeded": False,
     }
 
@@ -103,10 +121,10 @@ def _run_single_task_core(
     public_dataset = DABenchPublicDataset(config.dataset.root_path)
     task = public_dataset.get_task(task_id)
 
-    agent = ReActAgent(
+    agent = MultiAgentOrchestrator(
         model=model or build_model_adapter(config),
         tools=tools or create_default_tool_registry(),
-        config=ReActAgentConfig(max_steps=config.agent.max_steps),
+        max_steps=config.agent.max_steps,
     )
     run_result = agent.run(task)
     return run_result.to_dict()
@@ -140,26 +158,50 @@ def _run_single_task_with_timeout(*, task_id: str, config: AppConfig) -> dict[st
         args=(task_id, config, queue),
     )
     process.start()
-    process.join(timeout_seconds)
 
+    deadline = perf_counter() + timeout_seconds
+    result: dict[str, Any] | None = None
+    while result is None:
+        remaining_seconds = deadline - perf_counter()
+        if remaining_seconds <= 0:
+            process.terminate()
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            return _failure_run_result_payload(
+                task_id,
+                f"Task timed out after {timeout_seconds} seconds.",
+            )
+
+        try:
+            result = queue.get(timeout=min(0.5, remaining_seconds))
+            break
+        except queue_module.Empty:
+            if process.is_alive():
+                continue
+
+            process.join(timeout=1.0)
+            try:
+                result = queue.get_nowait()
+                break
+            except queue_module.Empty:
+                exit_code = process.exitcode
+                if exit_code not in (None, 0):
+                    return _failure_run_result_payload(
+                        task_id,
+                        f"Task exited unexpectedly with exit code {exit_code}.",
+                    )
+                return _failure_run_result_payload(task_id, "Task exited without returning a result.")
+
+    process.join(timeout=1.0)
     if process.is_alive():
         process.terminate()
         process.join(timeout=1.0)
         if process.is_alive():
             process.kill()
             process.join()
-        return _failure_run_result_payload(task_id, f"Task timed out after {timeout_seconds} seconds.")
 
-    if queue.empty():
-        exit_code = process.exitcode
-        if exit_code not in (None, 0):
-            return _failure_run_result_payload(
-                task_id,
-                f"Task exited unexpectedly with exit code {exit_code}.",
-            )
-        return _failure_run_result_payload(task_id, "Task exited without returning a result.")
-
-    result = queue.get()
     if result.get("ok"):
         return dict(result["run_result"])
     return _failure_run_result_payload(task_id, f"Task failed with uncaught error: {result['error']}")
@@ -214,13 +256,20 @@ def run_benchmark(
     model=None,
     tools: ToolRegistry | None = None,
     limit: int | None = None,
+    random_sample: int | None = None,
+    seed: int | None = None,
     progress_callback: Callable[[TaskRunArtifacts], None] | None = None,
 ) -> tuple[Path, list[TaskRunArtifacts]]:
     effective_run_id, run_output_dir = create_run_output_dir(config.run.output_dir, run_id=config.run.run_id)
 
     dataset = DABenchPublicDataset(config.dataset.root_path)
     tasks = dataset.iter_tasks()
-    if limit is not None:
+    if limit is not None and random_sample is not None:
+        raise ValueError("--limit and --random-sample are mutually exclusive.")
+    if random_sample is not None:
+        rng = random.Random(seed)
+        tasks = rng.sample(tasks, k=min(random_sample, len(tasks)))
+    elif limit is not None:
         tasks = tasks[:limit]
 
     effective_workers = config.run.max_workers

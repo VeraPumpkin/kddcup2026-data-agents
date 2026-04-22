@@ -51,8 +51,11 @@ class OpenAIModelAdapter:
         try:
             response = client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": message.role, "content": message.content} for message in messages],
-                temperature=self.temperature
+                messages=[
+                    {"role": message.role, "content": message.content}
+                    for message in messages
+                ],
+                temperature=self.temperature,
             )
         except APIError as exc:
             raise RuntimeError(f"Model request failed: {exc}") from exc
@@ -64,14 +67,3 @@ class OpenAIModelAdapter:
         if not isinstance(content, str):
             raise RuntimeError("Model response missing text content.")
         return content
-
-
-class ScriptedModelAdapter:
-    def __init__(self, responses: list[str]) -> None:
-        self._responses = list(responses)
-
-    def complete(self, messages: list[ModelMessage]) -> str:
-        del messages
-        if not self._responses:
-            raise RuntimeError("No scripted model responses remaining.")
-        return self._responses.pop(0)
