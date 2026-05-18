@@ -6,9 +6,16 @@ from typing import Any
 from data_agent_baseline.agents.model import ModelMessage
 
 
+TARGETED_DOC_EVIDENCE_ACTION = "extract_targeted_doc_evidence"
+
 LONG_TEXT_DOC_FACT_SYSTEM_PROMPT = """
 Role:
-You are a strict open-schema information extraction engine.
+You are a targeted document evidence extraction engine.
+
+Goal:
+Read the user question, knowledge context, schema summary, and all markdown document
+paragraphs. Extract only document evidence that is directly needed to answer the
+question or to build a schema-grounded semantic plan for the question.
 
 Output format:
 Return exactly one raw JSON object.
@@ -21,67 +28,57 @@ The JSON object must have keys:
 
 Available actions:
 Set action exactly to:
-extract_document_batch_facts
+extract_targeted_doc_evidence
 
 Put the extraction payload directly in action_input.
-
-Do not include thought.
+Use an empty string for thought.
 
 How to behave:
-1. Extract only facts explicitly stated in the provided paragraphs.
-2. Do not infer, guess, summarize, complete missing values, or use external knowledge.
-3. Use the provided paragraph objects as extraction units.
-4. Do not split, merge, reorder, or rename paragraphs.
-5. Return every target paragraph_id. If a paragraph has no extractable facts, return records as [].
-6. Do not create fields, entities, values, dates, identifiers, table names, or relationships that are not explicitly stated.
-7. Do not output paragraph_text, paragraph_index, or file_path in action_input.
-8. entity_name_raw must be short and semantically precise.
-9. entity_value_raw must preserve the original value as much as possible.
-10. Use attributes for property-value facts.
-11. Use relations only for explicit subject-relation-object facts.
-12. Do not duplicate the same fact as both an attribute and a relation.
+1. Extract only evidence explicitly stated in the provided document paragraphs.
+2. Use the question and knowledge context to decide relevance.
+3. Do not extract unrelated document facts.
+4. Do not infer, guess, summarize, complete missing values, or use external knowledge.
+5. Every evidence_text must be copied exactly from the paragraph_text of its paragraph_id.
+6. Do not return an item unless it supports an answer value, filter value, join clue, formula,
+   status/correction rule, comparison operand, or entity identification required by the question.
+7. If no relevant evidence is present, return an empty evidence array.
+8. Use concise target_name and target_value strings copied from the evidence whenever possible.
 
-Remember:
 Status definitions:
 - current: a currently valid value stated without correction or negation.
 - previous: an earlier value later corrected, superseded, or invalidated.
-- corrected: the corrected or final value after an explicit correction, revision, update, reassessment, audit, or reprocessing.
+- corrected: the corrected or final value after an explicit correction, revision, update, audit,
+  reassessment, or reprocessing.
 - negated: a value explicitly denied, rejected, or stated not to apply.
 - unknown: the paragraph states uncertainty or the status cannot be determined.
+
+Recommended evidence_role values:
+- answer_value
+- filter_value
+- join_evidence
+- formula_operand
+- calculation_rule
+- entity_context
+- status_context
 
 Output schema:
 
 {
-  "action": "extract_document_batch_facts",
+  "action": "extract_targeted_doc_evidence",
   "action_input": {
-    "batch_id": "string",
-    "paragraphs": [
+    "evidence": [
       {
+        "evidence_id": "string",
         "paragraph_id": "string",
-        "records": [
-          {
-            "record_anchor": {
-              "name": "string|null",
-              "type": "string"
-            },
-            "attributes": [
-              {
-                "entity_name_raw": "string",
-                "entity_value_raw": "string",
-                "value_type": "string|number|date|boolean|enum|unknown",
-                "unit": "string|null",
-                "status": "current|previous|corrected|negated|unknown"
-              }
-            ],
-            "relations": [
-              {
-                "subject_name": "string",
-                "relation_type": "string",
-                "object_name_or_value": "string"
-              }
-            ]
-          }
-        ]
+        "evidence_text": "exact substring copied from paragraph_text",
+        "evidence_role": "string",
+        "record_anchor_name": "string|null",
+        "record_anchor_type": "string|null",
+        "target_name": "string",
+        "target_value": "string",
+        "value_type": "string|number|date|boolean|enum|unknown",
+        "unit": "string|null",
+        "status": "current|previous|corrected|negated|unknown"
       }
     ]
   }
@@ -91,14 +88,36 @@ Output schema:
 
 def build_long_text_doc_fact_messages(
     *,
-    batch_id: str,
-    paragraphs: list[dict[str, Any]],
+    task_id: str,
+    question: str,
+    knowledge_context: str,
+    schema_summary: dict[str, Any],
+    documents: list[dict[str, Any]],
 ) -> list[ModelMessage]:
     user_payload = {
-        "batch_id": batch_id,
-        "paragraphs": paragraphs,
+        "task_id": task_id,
+        "question": question,
+        "knowledge_context": knowledge_context,
+        "schema_summary": schema_summary,
+        "documents": documents,
     }
     return [
         ModelMessage(role="system", content=LONG_TEXT_DOC_FACT_SYSTEM_PROMPT),
         ModelMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False, indent=2)),
     ]
+
+
+def build_long_text_doc_repair_message(error: str) -> ModelMessage:
+    repair_payload = {
+        "repair_instruction": (
+            "The previous targeted document evidence response was invalid. "
+            "Return exactly one raw JSON object with action extract_targeted_doc_evidence. "
+            "Keep only relevant evidence. Ensure every evidence_text is an exact substring "
+            "of the paragraph_text for its paragraph_id."
+        ),
+        "error": error,
+    }
+    return ModelMessage(
+        role="user",
+        content=json.dumps(repair_payload, ensure_ascii=False, indent=2),
+    )

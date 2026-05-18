@@ -69,10 +69,12 @@ class UnderstandingToolRegistry:
         task: PublicTask,
         candidate_store: CandidateStore,
         knowledge_context: str = "",
+        doc_evidence_context: str = "",
     ) -> None:
         self.task = task
         self.original_question = str(task.question or "")
         self.knowledge_context = str(knowledge_context or "")
+        self.doc_evidence_context = str(doc_evidence_context or "")
         self.candidate_store = candidate_store
         self.database_name = task.context_dir.name or task.task_id
         self.retrieval_config = HybridRetrievalConfig(
@@ -146,9 +148,9 @@ class UnderstandingToolRegistry:
                     "Search the database schema for schema concept phrases. "
                     "Initial queries must be exact phrases extracted from the original user "
                     "question. Follow-up operand queries may be exact phrases copied from the "
-                    "provided knowledge context evidence. Do not rewrite, expand, normalize, "
-                    "translate, generalize, invent query text, or use schema-derived table names "
-                    "or field names."
+                    "provided knowledge context evidence or targeted document evidence. Do not "
+                    "rewrite, expand, normalize, translate, generalize, invent query text, or "
+                    "use schema-derived table names or field names."
                 ),
                 input_schema={
                     "type": "object",
@@ -284,20 +286,24 @@ class UnderstandingToolRegistry:
     def _validate_schema_search_query(self, query: str) -> str:
         question_tokens = self._question_phrase_tokens(self.original_question)
         knowledge_context_tokens = self._question_phrase_tokens(self.knowledge_context)
+        doc_evidence_context_tokens = self._question_phrase_tokens(self.doc_evidence_context)
         query_tokens = self._question_phrase_tokens(query)
         if not query_tokens:
             raise ValueError(
                 "semantic_schema_search.queries item must include a phrase from the original "
-                "question or provided knowledge context evidence."
+                "question, provided knowledge context evidence, or targeted document evidence."
             )
         if self._contains_question_phrase(question_tokens, query_tokens):
             return "question"
         if self._contains_question_phrase(knowledge_context_tokens, query_tokens):
             return "knowledge_context"
+        if self._contains_question_phrase(doc_evidence_context_tokens, query_tokens):
+            return "doc_evidence_context"
         raise ValueError(
-            "semantic_schema_search.queries item must be a phrase from the original question "
-            "or provided knowledge context evidence. Do not use rewritten, expanded, normalized, "
-            "translated, generalized, schema-derived, or invented query text."
+            "semantic_schema_search.queries item must be a phrase from the original question, "
+            "provided knowledge context evidence, or targeted document evidence. Do not use "
+            "rewritten, expanded, normalized, translated, generalized, schema-derived, or "
+            "invented query text."
         )
 
     def _contains_question_phrase(

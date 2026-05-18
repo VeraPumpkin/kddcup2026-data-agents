@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from data_agent_baseline.agents.long_text_doc.prompt import build_long_text_doc_fact_messages
-from data_agent_baseline.agents.model import OpenAIModelAdapter
+from data_agent_baseline.agents.long_text_doc.prompt import (
+    TARGETED_DOC_EVIDENCE_ACTION,
+    build_long_text_doc_fact_messages,
+    build_long_text_doc_repair_message,
+)
+from data_agent_baseline.agents.model import ModelMessage, OpenAIModelAdapter
 from data_agent_baseline.agents.react import parse_model_step
 from data_agent_baseline.agents.runtime import StepRecord
 from data_agent_baseline.benchmark.schema import PublicTask
@@ -18,37 +22,41 @@ LOGGER = logging.getLogger(__name__)
 
 SOURCE_AGENT = "LongTextDocFactAgent"
 DEFAULT_DOC_GLOB = "doc/*.md"
-EXTRACT_BATCH_ACTION = "extract_document_batch_facts"
-DEFAULT_DOC_BATCH_CHAR_BUDGET = 48_000
+MAX_EVIDENCE_CONTEXT_CHARS = 20_000
 
 _BLANK_LINE_PATTERN = re.compile(r"(?:\r?\n)[ \t]*(?:\r?\n)+")
 _ALLOWED_VALUE_TYPES = {"string", "number", "date", "boolean", "enum", "unknown"}
 _ALLOWED_STATUSES = {"current", "previous", "corrected", "negated", "unknown"}
-_FORBIDDEN_BATCH_OUTPUT_KEYS = {"paragraph_text", "paragraph_index", "file_path"}
 
 
 @dataclass(frozen=True, slots=True)
 class MarkdownParagraph:
     file_path: str
     paragraph_id: str
+    paragraph_index: int
     paragraph_text: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "file_path": self.file_path,
             "paragraph_id": self.paragraph_id,
+            "paragraph_index": self.paragraph_index,
         }
 
     def prompt_dict(self) -> dict[str, Any]:
         return {
             "file_path": self.file_path,
             "paragraph_id": self.paragraph_id,
+            "paragraph_index": self.paragraph_index,
             "paragraph_text": self.paragraph_text,
         }
 
     def duckdb_row(self) -> dict[str, Any]:
         return {
             "paragraph_id": self.paragraph_id,
+            "file_path": self.file_path,
+            "paragraph_index": self.paragraph_index,
+            "paragraph_text": self.paragraph_text,
         }
 
 
@@ -59,10 +67,51 @@ class MarkdownDocument:
     full_text: str
     paragraphs: list[MarkdownParagraph]
 
+    def prompt_dict(self) -> dict[str, Any]:
+        return {
+            "file_path": self.file_path,
+            "paragraphs": [paragraph.prompt_dict() for paragraph in self.paragraphs],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DocEvidence:
+    evidence_id: str
+    paragraph_id: str
+    file_path: str
+    evidence_text: str
+    evidence_role: str
+    record_anchor_name: str | None
+    record_anchor_type: str | None
+    target_name: str
+    target_value: str
+    value_type: str
+    unit: str | None
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence_id": self.evidence_id,
+            "paragraph_id": self.paragraph_id,
+            "file_path": self.file_path,
+            "evidence_text": self.evidence_text,
+            "evidence_role": self.evidence_role,
+            "record_anchor_name": self.record_anchor_name,
+            "record_anchor_type": self.record_anchor_type,
+            "target_name": self.target_name,
+            "target_value": self.target_value,
+            "value_type": self.value_type,
+            "unit": self.unit,
+            "status": self.status,
+        }
+
+    def duckdb_row(self) -> dict[str, Any]:
+        return self.to_dict()
+
 
 @dataclass(frozen=True, slots=True)
 class DocAttributeFact:
-    file_path: str
+    evidence_id: str
     paragraph_id: str
     record_anchor_name: str | None
     record_anchor_type: str | None
@@ -71,10 +120,12 @@ class DocAttributeFact:
     value_type: str
     unit: str | None
     status: str
+    evidence_text: str
+    evidence_role: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "file_path": self.file_path,
+            "evidence_id": self.evidence_id,
             "paragraph_id": self.paragraph_id,
             "record_anchor_name": self.record_anchor_name,
             "record_anchor_type": self.record_anchor_type,
@@ -83,69 +134,34 @@ class DocAttributeFact:
             "value_type": self.value_type,
             "unit": self.unit,
             "status": self.status,
+            "evidence_text": self.evidence_text,
+            "evidence_role": self.evidence_role,
         }
 
     def duckdb_row(self) -> dict[str, Any]:
-        return {
-            "paragraph_id": self.paragraph_id,
-            "record_anchor_name": self.record_anchor_name,
-            "record_anchor_type": self.record_anchor_type,
-            "entity_name_raw": self.entity_name_raw,
-            "entity_value_raw": self.entity_value_raw,
-            "value_type": self.value_type,
-            "unit": self.unit,
-            "status": self.status,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class DocRelationFact:
-    file_path: str
-    paragraph_id: str
-    subject_name: str
-    relation_type: str
-    object_name_or_value: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "file_path": self.file_path,
-            "paragraph_id": self.paragraph_id,
-            "subject_name": self.subject_name,
-            "relation_type": self.relation_type,
-            "object_name_or_value": self.object_name_or_value,
-        }
-
-    def duckdb_row(self) -> dict[str, Any]:
-        return {
-            "paragraph_id": self.paragraph_id,
-            "subject_name": self.subject_name,
-            "relation_type": self.relation_type,
-            "object_name_or_value": self.object_name_or_value,
-        }
+        return self.to_dict()
 
 
 @dataclass(frozen=True, slots=True)
 class LongTextDocFactOutput:
     paragraphs: list[MarkdownParagraph]
+    evidence: list[DocEvidence]
     facts: list[DocAttributeFact]
-    relations: list[DocRelationFact]
+    evidence_context: str
+    diagnostics: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "paragraphs": [item.to_dict() for item in self.paragraphs],
+            "evidence": [item.to_dict() for item in self.evidence],
             "facts": [item.to_dict() for item in self.facts],
-            "relations": [item.to_dict() for item in self.relations],
+            "evidence_context": self.evidence_context,
+            "diagnostics": list(self.diagnostics),
         }
 
 
-@dataclass(frozen=True, slots=True)
-class _ParagraphBatch:
-    batch_id: str
-    paragraphs: list[MarkdownParagraph]
-
-
 class LongTextDocFactAgent:
-    """Extract paragraph-level structured facts from context/doc/*.md files."""
+    """Extract question-targeted evidence from context/doc/*.md files."""
 
     def __init__(
         self,
@@ -153,7 +169,6 @@ class LongTextDocFactAgent:
         model: OpenAIModelAdapter,
     ) -> None:
         self.model = model
-        self.doc_batch_char_budget = DEFAULT_DOC_BATCH_CHAR_BUDGET
         self.last_steps: list[StepRecord] = []
         self.last_output: LongTextDocFactOutput | None = None
 
@@ -167,41 +182,33 @@ class LongTextDocFactAgent:
         self.last_steps = []
         documents = self._load_documents(task)
         all_paragraphs = [paragraph for document in documents for paragraph in document.paragraphs]
-        facts: list[DocAttributeFact] = []
-        relations: list[DocRelationFact] = []
-        failed_batch_count = 0
-        json_parse_failure_count = 0
-        batches, oversized_paragraph_count = self._build_paragraph_batches(all_paragraphs)
-        for batch in batches:
-            payload, failure_status = self._extract_batch(batch)
-            if payload is None:
-                failed_batch_count += 1
-                if failure_status == "json_parse_error":
-                    json_parse_failure_count += 1
-                continue
-            batch_facts, batch_relations = self._flatten_payload(
-                batch.paragraphs,
-                payload,
-            )
-            facts.extend(batch_facts)
-            relations.extend(batch_relations)
+        evidence: list[DocEvidence] = []
+        diagnostics: list[str] = []
 
         if all_paragraphs:
-            structured_store.register_doc_fact_tables(
-                paragraphs=[item.duckdb_row() for item in all_paragraphs],
-                facts=[item.duckdb_row() for item in facts],
-                relations=[item.duckdb_row() for item in relations],
+            evidence, diagnostics = self._extract_targeted_evidence(
+                task=task,
+                structured_store=structured_store,
+                documents=documents,
+                paragraphs=all_paragraphs,
             )
+
+        facts = self._facts_from_evidence(evidence)
+        evidence_context = self._render_evidence_context(evidence, diagnostics)
+        structured_store.register_doc_evidence_tables(
+            paragraphs=[item.duckdb_row() for item in all_paragraphs],
+            evidence=[item.duckdb_row() for item in evidence],
+            facts=[item.duckdb_row() for item in facts],
+        )
         output = LongTextDocFactOutput(
             paragraphs=all_paragraphs,
+            evidence=evidence,
             facts=facts,
-            relations=relations,
+            evidence_context=evidence_context,
+            diagnostics=diagnostics,
         )
         self.last_output = output
-        LOGGER.warning(
-            "LongTextDocFactAgent finish task_id=%s",
-            task.task_id,
-        )
+        LOGGER.warning("LongTextDocFactAgent finish task_id=%s", task.task_id)
         return output
 
     def _load_documents(self, task: PublicTask) -> list[MarkdownDocument]:
@@ -241,256 +248,206 @@ class LongTextDocFactAgent:
                 MarkdownParagraph(
                     file_path=file_path,
                     paragraph_id=f"{document_stem}::p{paragraph_index}",
+                    paragraph_index=paragraph_index,
                     paragraph_text=paragraph_text,
                 )
             )
         return paragraphs
 
-    def _build_paragraph_batches(
+    def _extract_targeted_evidence(
         self,
+        *,
+        task: PublicTask,
+        structured_store: StructuredContextStore,
+        documents: list[MarkdownDocument],
         paragraphs: list[MarkdownParagraph],
-    ) -> tuple[list[_ParagraphBatch], int]:
-        batches: list[_ParagraphBatch] = []
-        current: list[MarkdownParagraph] = []
-        oversized_paragraph_count = 0
-
-        for paragraph in paragraphs:
-            batch_id = self._batch_id(len(batches))
-            candidate = [*current, paragraph]
-            candidate_chars = self._batch_user_payload_char_count(batch_id, candidate)
-            if current and candidate_chars > self.doc_batch_char_budget:
-                batches.append(_ParagraphBatch(batch_id=batch_id, paragraphs=current))
-                current = [paragraph]
-                single_chars = self._batch_user_payload_char_count(
-                    self._batch_id(len(batches)),
-                    current,
-                )
-                if single_chars > self.doc_batch_char_budget:
-                    oversized_paragraph_count += 1
-                continue
-            if not current and candidate_chars > self.doc_batch_char_budget:
-                oversized_paragraph_count += 1
-            current = candidate
-
-        if current:
-            batches.append(_ParagraphBatch(batch_id=self._batch_id(len(batches)), paragraphs=current))
-        return batches, oversized_paragraph_count
-
-    def _extract_batch(
-        self,
-        batch: _ParagraphBatch,
-    ) -> tuple[dict[str, Any] | None, str | None]:
+    ) -> tuple[list[DocEvidence], list[str]]:
         messages = build_long_text_doc_fact_messages(
-            batch_id=batch.batch_id,
-            paragraphs=[paragraph.prompt_dict() for paragraph in batch.paragraphs],
+            task_id=task.task_id,
+            question=task.question,
+            knowledge_context=self._read_knowledge_context(task),
+            schema_summary=structured_store.inspect_schema(),
+            documents=[document.prompt_dict() for document in documents],
         )
-        step_index = len(self.last_steps) + 1
+        paragraph_by_id = {paragraph.paragraph_id: paragraph for paragraph in paragraphs}
         raw_response = ""
-        try:
-            raw_response = self.model.complete(messages)
-        except Exception as exc:
-            self._record_step(
-                step_index=step_index,
-                thought="",
-                action="__error__",
-                action_input={},
-                raw_response=raw_response,
-                observation={"ok": False, "error": str(exc), "batch_id": batch.batch_id},
-                ok=False,
-                status="model_error",
-            )
-            return None, "model_error"
+        last_error = ""
+        for attempt in range(1, 3):
+            step_index = len(self.last_steps) + 1
+            try:
+                raw_response = self.model.complete(messages)
+                model_step = parse_model_step(raw_response)
+                evidence, diagnostics = self._parse_targeted_payload(
+                    model_step.action,
+                    model_step.action_input,
+                    paragraph_by_id=paragraph_by_id,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                status = self._failure_status(exc)
+                self._record_step(
+                    step_index=step_index,
+                    thought="",
+                    action="__error__",
+                    action_input={"attempt": attempt},
+                    raw_response=raw_response,
+                    observation={
+                        "ok": False,
+                        "error": last_error,
+                        "attempt": attempt,
+                    },
+                    ok=False,
+                    status=status,
+                )
+                if attempt == 1:
+                    if raw_response:
+                        messages.append(ModelMessage(role="assistant", content=raw_response))
+                    messages.append(build_long_text_doc_repair_message(last_error))
+                    continue
+                return [], [f"targeted_doc_evidence_failed: {last_error}"]
 
-        try:
-            model_step = parse_model_step(raw_response)
-        except Exception as exc:
-            self._record_step(
-                step_index=step_index,
-                thought="",
-                action="__error__",
-                action_input={},
-                raw_response=raw_response,
-                observation={"ok": False, "error": str(exc), "batch_id": batch.batch_id},
-                ok=False,
-                status="json_parse_error",
-            )
-            return None, "json_parse_error"
-
-        try:
-            payload = self._parse_batch_payload(model_step.action, model_step.action_input, batch)
-        except Exception as exc:
             self._record_step(
                 step_index=step_index,
                 thought=model_step.thought,
                 action=model_step.action,
                 action_input=model_step.action_input,
                 raw_response=model_step.raw_response,
-                observation={"ok": False, "error": str(exc), "batch_id": batch.batch_id},
-                ok=False,
-                status="schema_validation_error",
+                observation={
+                    "ok": True,
+                    "tool": model_step.action,
+                    "attempt": attempt,
+                    "paragraph_count": len(paragraphs),
+                    "evidence_count": len(evidence),
+                    "diagnostics": diagnostics,
+                },
+                ok=True,
+                status="parsed",
             )
-            return None, "schema_validation_error"
+            return evidence, diagnostics
 
-        self._record_step(
-            step_index=step_index,
-            thought=model_step.thought,
-            action=model_step.action,
-            action_input=model_step.action_input,
-            raw_response=model_step.raw_response,
-            observation={
-                "ok": True,
-                "tool": model_step.action,
-                "batch_id": batch.batch_id,
-                "paragraph_count": len(payload.get("paragraphs", [])),
-            },
-            ok=True,
-            status="parsed",
-        )
-        return payload, None
+        return [], [f"targeted_doc_evidence_failed: {last_error}"]
 
-    def _flatten_payload(
-        self,
-        paragraphs: list[MarkdownParagraph],
-        payload: dict[str, Any],
-    ) -> tuple[list[DocAttributeFact], list[DocRelationFact]]:
-        paragraph_by_id = {paragraph.paragraph_id: paragraph for paragraph in paragraphs}
-        facts: list[DocAttributeFact] = []
-        relations: list[DocRelationFact] = []
-
-        for paragraph_payload in payload.get("paragraphs", []):
-            if not isinstance(paragraph_payload, dict):
-                continue
-            paragraph = paragraph_by_id.get(str(paragraph_payload.get("paragraph_id") or ""))
-            if paragraph is None:
-                continue
-            records = paragraph_payload.get("records", [])
-            if not isinstance(records, list):
-                continue
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                anchor = record.get("record_anchor")
-                anchor_payload = anchor if isinstance(anchor, dict) else {}
-                anchor_name = _optional_str(anchor_payload.get("name"))
-                anchor_type = _optional_str(anchor_payload.get("type")) or "unknown"
-
-                attributes = record.get("attributes", [])
-                if isinstance(attributes, list):
-                    for attribute in attributes:
-                        if not isinstance(attribute, dict):
-                            continue
-                        facts.append(
-                            DocAttributeFact(
-                                file_path=paragraph.file_path,
-                                paragraph_id=paragraph.paragraph_id,
-                                record_anchor_name=anchor_name,
-                                record_anchor_type=anchor_type,
-                                entity_name_raw=str(attribute.get("entity_name_raw") or ""),
-                                entity_value_raw=str(attribute.get("entity_value_raw") or ""),
-                                value_type=_allowed_text(
-                                    attribute.get("value_type"),
-                                    _ALLOWED_VALUE_TYPES,
-                                    default="unknown",
-                                ),
-                                unit=_optional_str(attribute.get("unit")),
-                                status=_allowed_text(
-                                    attribute.get("status"),
-                                    _ALLOWED_STATUSES,
-                                    default="unknown",
-                                ),
-                            )
-                        )
-
-                relation_items = record.get("relations", [])
-                if isinstance(relation_items, list):
-                    for relation in relation_items:
-                        if not isinstance(relation, dict):
-                            continue
-                        relations.append(
-                            DocRelationFact(
-                                file_path=paragraph.file_path,
-                                paragraph_id=paragraph.paragraph_id,
-                                subject_name=str(relation.get("subject_name") or ""),
-                                relation_type=str(relation.get("relation_type") or ""),
-                                object_name_or_value=str(relation.get("object_name_or_value") or ""),
-                            )
-                        )
-        return facts, relations
-
-    def _parse_batch_payload(
+    def _parse_targeted_payload(
         self,
         action: str,
         action_input: dict[str, Any],
-        batch: _ParagraphBatch,
-    ) -> dict[str, Any]:
-        if action != EXTRACT_BATCH_ACTION:
-            raise ValueError(f"Long text doc action must be {EXTRACT_BATCH_ACTION}.")
-        payload = dict(action_input)
-        self._validate_payload_shape(
-            payload,
-            batch_id=batch.batch_id,
-            allowed_paragraph_ids={paragraph.paragraph_id for paragraph in batch.paragraphs},
-        )
-        return payload
-
-    def _validate_payload_shape(
-        self,
-        payload: dict[str, Any],
         *,
-        batch_id: str,
-        allowed_paragraph_ids: set[str],
-    ) -> None:
-        if any(key in payload for key in _FORBIDDEN_BATCH_OUTPUT_KEYS):
-            raise ValueError("Long text doc batch payload must not include source paragraph fields.")
-        if str(payload.get("batch_id") or "") != batch_id:
-            raise ValueError("Long text doc extraction payload batch_id does not match request.")
-        paragraphs = payload.get("paragraphs")
-        if not isinstance(paragraphs, list):
-            raise ValueError("Long text doc extraction payload must contain paragraphs list.")
-        for index, paragraph in enumerate(paragraphs):
-            if not isinstance(paragraph, dict):
-                raise ValueError(f"paragraphs[{index}] must be an object.")
-            if any(key in paragraph for key in _FORBIDDEN_BATCH_OUTPUT_KEYS):
-                raise ValueError(
-                    f"paragraphs[{index}] must not include source paragraph fields."
+        paragraph_by_id: dict[str, MarkdownParagraph],
+    ) -> tuple[list[DocEvidence], list[str]]:
+        if action != TARGETED_DOC_EVIDENCE_ACTION:
+            raise ValueError(f"Long text doc action must be {TARGETED_DOC_EVIDENCE_ACTION}.")
+        payload = dict(action_input)
+        evidence_items = payload.get("evidence")
+        if not isinstance(evidence_items, list):
+            raise ValueError("targeted document evidence payload must contain evidence list.")
+
+        evidence: list[DocEvidence] = []
+        diagnostics = [
+            str(item)
+            for item in payload.get("diagnostics", [])
+            if isinstance(item, str) and item.strip()
+        ]
+        used_ids: set[str] = set()
+        for index, item in enumerate(evidence_items):
+            if not isinstance(item, dict):
+                diagnostics.append(f"rejected evidence[{index}]: item is not an object")
+                continue
+            paragraph_id = str(item.get("paragraph_id") or "").strip()
+            paragraph = paragraph_by_id.get(paragraph_id)
+            if paragraph is None:
+                diagnostics.append(f"rejected evidence[{index}]: unknown paragraph_id {paragraph_id}")
+                continue
+            evidence_text = str(item.get("evidence_text") or "").strip()
+            if not evidence_text:
+                diagnostics.append(f"rejected evidence[{index}]: empty evidence_text")
+                continue
+            if evidence_text not in paragraph.paragraph_text:
+                diagnostics.append(
+                    f"rejected evidence[{index}]: evidence_text is not an exact paragraph substring"
                 )
-            paragraph_id = str(paragraph.get("paragraph_id") or "").strip()
-            if not paragraph_id:
-                raise ValueError(f"paragraphs[{index}].paragraph_id must be a non-empty string.")
-            if paragraph_id not in allowed_paragraph_ids:
-                raise ValueError(f"paragraphs[{index}].paragraph_id is not in the current batch.")
-            if not isinstance(paragraph.get("records"), list):
-                raise ValueError(f"paragraphs[{index}].records must be a list.")
-            for record_index, record in enumerate(paragraph["records"]):
-                if not isinstance(record, dict):
-                    raise ValueError(
-                        f"paragraphs[{index}].records[{record_index}] must be an object."
-                    )
-                anchor = record.get("record_anchor")
-                if anchor is not None and not isinstance(anchor, dict):
-                    raise ValueError(
-                        f"paragraphs[{index}].records[{record_index}].record_anchor must be an object or null."
-                    )
-                attributes = record.get("attributes", [])
-                if not isinstance(attributes, list):
-                    raise ValueError(
-                        f"paragraphs[{index}].records[{record_index}].attributes must be a list."
-                    )
-                relations = record.get("relations", [])
-                if not isinstance(relations, list):
-                    raise ValueError(
-                        f"paragraphs[{index}].records[{record_index}].relations must be a list."
-                    )
-                for attribute_index, attribute in enumerate(attributes):
-                    if not isinstance(attribute, dict):
-                        raise ValueError(
-                            f"paragraphs[{index}].records[{record_index}].attributes[{attribute_index}] must be an object."
-                        )
-                for relation_index, relation in enumerate(relations):
-                    if not isinstance(relation, dict):
-                        raise ValueError(
-                            f"paragraphs[{index}].records[{record_index}].relations[{relation_index}] must be an object."
-                        )
+                continue
+            target_name = str(item.get("target_name") or "").strip()
+            target_value = str(item.get("target_value") or "").strip()
+            if not target_name or not target_value:
+                diagnostics.append(f"rejected evidence[{index}]: missing target_name or target_value")
+                continue
+
+            evidence_id = str(item.get("evidence_id") or "").strip()
+            if not evidence_id or evidence_id in used_ids:
+                evidence_id = self._evidence_id(paragraph_id, index, used_ids)
+            used_ids.add(evidence_id)
+
+            evidence.append(
+                DocEvidence(
+                    evidence_id=evidence_id,
+                    paragraph_id=paragraph.paragraph_id,
+                    file_path=paragraph.file_path,
+                    evidence_text=evidence_text,
+                    evidence_role=str(item.get("evidence_role") or "supporting_fact").strip(),
+                    record_anchor_name=_optional_str(item.get("record_anchor_name")),
+                    record_anchor_type=_optional_str(item.get("record_anchor_type")),
+                    target_name=target_name,
+                    target_value=target_value,
+                    value_type=_allowed_text(
+                        item.get("value_type"),
+                        _ALLOWED_VALUE_TYPES,
+                        default="unknown",
+                    ),
+                    unit=_optional_str(item.get("unit")),
+                    status=_allowed_text(
+                        item.get("status"),
+                        _ALLOWED_STATUSES,
+                        default="unknown",
+                    ),
+                )
+            )
+        return evidence, diagnostics
+
+    def _facts_from_evidence(self, evidence: list[DocEvidence]) -> list[DocAttributeFact]:
+        facts: list[DocAttributeFact] = []
+        for item in evidence:
+            facts.append(
+                DocAttributeFact(
+                    evidence_id=item.evidence_id,
+                    paragraph_id=item.paragraph_id,
+                    record_anchor_name=item.record_anchor_name,
+                    record_anchor_type=item.record_anchor_type,
+                    entity_name_raw=item.target_name,
+                    entity_value_raw=item.target_value,
+                    value_type=item.value_type,
+                    unit=item.unit,
+                    status=item.status,
+                    evidence_text=item.evidence_text,
+                    evidence_role=item.evidence_role,
+                )
+            )
+        return facts
+
+    def _render_evidence_context(
+        self,
+        evidence: list[DocEvidence],
+        diagnostics: list[str],
+    ) -> str:
+        lines = []
+        if not evidence:
+            lines.append("No targeted document evidence extracted.")
+        for item in evidence:
+            anchor = item.record_anchor_name or ""
+            target = item.target_name or ""
+            value = item.target_value or ""
+            evidence_text = _single_line(item.evidence_text)
+            lines.append(
+                f"- {item.evidence_id} | role={item.evidence_role} | "
+                f"paragraph={item.paragraph_id} | anchor={anchor} | "
+                f"target={target} | value={value} | status={item.status} | "
+                f"evidence={evidence_text}"
+            )
+        for diagnostic in diagnostics:
+            lines.append(f"- diagnostic: {_single_line(diagnostic)}")
+        context = "\n".join(lines)
+        if len(context) <= MAX_EVIDENCE_CONTEXT_CHARS:
+            return context
+        return context[: MAX_EVIDENCE_CONTEXT_CHARS - 20].rstrip() + "\n...[truncated]"
 
     def _record_step(
         self,
@@ -527,19 +484,32 @@ class LongTextDocFactAgent:
             return False
         return relative.startswith("doc/") and path.suffix.lower() == ".md"
 
-    def _batch_user_payload_char_count(
-        self,
-        batch_id: str,
-        paragraphs: list[MarkdownParagraph],
-    ) -> int:
-        messages = build_long_text_doc_fact_messages(
-            batch_id=batch_id,
-            paragraphs=[paragraph.prompt_dict() for paragraph in paragraphs],
-        )
-        return len(messages[1].content)
+    def _read_knowledge_context(self, task: PublicTask) -> str:
+        knowledge_path = task.context_dir / "knowledge.md"
+        if not knowledge_path.is_file():
+            return ""
+        return knowledge_path.read_text(errors="replace")
 
-    def _batch_id(self, index: int) -> str:
-        return f"doc_batch_{index}"
+    def _evidence_id(
+        self,
+        paragraph_id: str,
+        index: int,
+        used_ids: set[str],
+    ) -> str:
+        base = f"doc_evidence::{paragraph_id}::{index}"
+        candidate = base
+        suffix = 1
+        while candidate in used_ids:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def _failure_status(self, exc: Exception) -> str:
+        message = str(exc)
+        if "JSON" in message or "Expecting" in message:
+            return "json_parse_error"
+        return "schema_validation_error"
+
 
 def _split_paragraphs(text: str) -> list[str]:
     return [paragraph.strip() for paragraph in _BLANK_LINE_PATTERN.split(text) if paragraph.strip()]
@@ -555,3 +525,7 @@ def _optional_str(value: Any) -> str | None:
 def _allowed_text(value: Any, allowed: set[str], *, default: str) -> str:
     text = str(value or "").strip().lower()
     return text if text in allowed else default
+
+
+def _single_line(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip()

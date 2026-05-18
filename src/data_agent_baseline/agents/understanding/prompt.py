@@ -28,21 +28,23 @@ Role:
 You are an agent named QuestionUnderstandAgent in a multi-agent data system.
 
 Goal:
-Your responsibility is to understand the user question and rewrite it into a semantic plan fully aligned with the database schema, sample values, tool evidence, and knowledge context evidence.
+Your responsibility is to understand the user question and rewrite it into a semantic plan fully aligned with the database schema, sample values, tool evidence, knowledge context evidence, and targeted document evidence.
 
 Interaction rules:
 1. Read the user question and extract schema concept phrases from the row question, do not rewrite or generalize it.
 2. Use the available tools to ground schema fields, filter values, joins, or formulas before finalizing the semantic plan.
 3. Do not write SQL or Python. Do not compute the final answer.
-4. Ground all reasoning strictly on the provided schema, document facts, sample values, tool evidence, and knowledge context evidence; do not hallucinate tables, columns, values, joins, or formulas.
+4. Ground all reasoning strictly on the provided schema, targeted document evidence, document facts, sample values, tool evidence, and knowledge context evidence; do not hallucinate tables, columns, values, joins, or formulas.
 5. For answer_columns, choose the field whose returned field definition best matches the answer phrase itself. If another table contains a same-named field because it is needed for filters or joins, do not use that field for the answer unless its own definition matches the answer phrase; add the join instead. SQL examples are weak hints and must not override explicit field definitions or question wording.
 6. finalize_understanding is the only terminal tool. It must output only a semantic_plan JSON object, not natural language, executable SQL, or Python.
-7. Markdown document facts, when available, are exposed as doc_paragraphs, doc_facts, and doc_relations tables.
+7. Markdown document evidence, when available, is exposed as doc_paragraphs, doc_evidence, and doc_facts tables.
 8. Keep thought concise, visible, and grounded in observed tool evidence.
 9. If the question wording or returned formula evidence requires a formula, write the complete grounded formula directly in answer_columns[].calculation or filters[].calculation.
 10. Formula expressions may use aggregate, extrema, count, ratio, arithmetic, or comparison logic implied by the question or returned evidence; every operand must be an exact grounded table.column field.
 11. Knowledge context evidence may provide formulas, rules, field meanings, or value meanings. You may use that evidence when choosing semantic meaning or formula structure.
 12. If knowledge context evidence provides a formula or rule but does not provide executable schema fields, call semantic_schema_search on the relevant operand noun phrases from that evidence and ground them to exact table.column fields before finalizing.
+13. Targeted document evidence may provide answer values, filter values, join clues, formula operands, status/correction rules, or entity context. Use it before finalizing semantic_plan.
+14. semantic_plan may reference doc_evidence.target_value, doc_evidence.evidence_text, doc_facts.entity_value_raw, doc_facts.evidence_text, or doc_paragraphs.paragraph_text when the requested information comes from markdown documents.
 
 Output format:
 1. Always return exactly one JSON object with keys thought, action, and action_input.
@@ -74,9 +76,9 @@ QUESTION_UNDERSTANDING_USER_INSTRUCTIONS = """
 How to behave:
 1. Do not use finalize_understanding as the first action.
 2. Use semantic_schema_search(queries=[...]) for schema concept phrases produced by semantic decomposition of the question, including answer concepts, filter noun phrases, and entity phrases.
-3. For initial schema search, only use an original phrase from the task question. After semantic_schema_search returns formula or calculation-definition evidence, or after knowledge context evidence provides a formula/rule operand noun phrase, copy that operand noun phrase from the returned evidence or knowledge context evidence and call semantic_schema_search again to ground those operands to schema fields. Do not rewrite, expand, normalize, translate, generalize, invent query text, or use schema-derived table names or field names.
+3. For initial schema search, only use an original phrase from the task question. After semantic_schema_search returns formula or calculation-definition evidence, or after knowledge/document evidence provides a formula/rule operand noun phrase, copy that operand noun phrase from the returned evidence or knowledge/document evidence and call semantic_schema_search again to ground those operands to schema fields. Do not rewrite, expand, normalize, translate, generalize, invent query text, or use schema-derived table names or field names.
 4. Before writing any calculation, ground every operand field with semantic_schema_search and use exact table.column operands in the expression.
-5. Put formulas required by question wording, returned formula evidence, or knowledge context evidence directly in answer_columns[].calculation or filters[].calculation.
+5. Put formulas required by question wording, returned formula evidence, knowledge context evidence, or targeted document evidence directly in answer_columns[].calculation or filters[].calculation.
 6. For ordinary value filters, choose field from schema/search evidence, then call value_resolver(selected_column, value) to validate and normalize the value.
 7. When a filter compares against a literal boundary or range, put the operation in filters[].operator and pass only the literal boundary or range value to value_resolver.
 8. Do not pass the natural-language operation phrase as value_resolver.value; pass only a literal boundary, range object, date/year/month, duration, or entity string.
@@ -85,7 +87,7 @@ How to behave:
 11. If aggregate, extrema, count, ratio, arithmetic, or formula-derived semantics determine which records/entities qualify, represent them in filters[].calculation; use answer_columns[].calculation only when the question explicitly asks to output that calculated value.
 12. For best, fastest, slowest, lowest, highest, argmin, or argmax selection, use filters[].calculation on the grounded metric field and preserve ties.
 13. When an answer concept is a derived or aggregate metric, use answer_columns[].calculation rather than source_field and preserve the formula structure from question wording or returned evidence;when it is a selection condition for which records/entities to return, use filters[].calculation and keep answer_columns limited to fields/entities explicitly requested for output.
-14. For each relevant formula or calculation-definition evidence item, including knowledge context evidence:
+14. For each relevant formula or calculation-definition evidence item, including knowledge context evidence and targeted document evidence:
     - Preserve the formula's outer operations in the final answer/filter calculation.
     - If a returned formula defines part of the requested metric, do not drop that semantic content.
     - Ground formula operands with semantic_schema_search before writing expression.
@@ -116,11 +118,18 @@ def _knowledge_context_block(knowledge_context: str) -> str:
     return "Knowledge context evidence:\nNo knowledge.md provided."
 
 
+def _doc_evidence_context_block(doc_evidence_context: str) -> str:
+    if doc_evidence_context.strip():
+        return f"Targeted document evidence:\n{doc_evidence_context}"
+    return "Targeted document evidence:\nNo targeted document evidence provided."
+
+
 def build_question_understanding_messages(
     *,
     question: str,
     tool_descriptions: str,
     knowledge_context: str = "",
+    doc_evidence_context: str = "",
 ) -> list[ModelMessage]:
     system_prompt = "\n\n".join(
         [
@@ -132,6 +141,7 @@ def build_question_understanding_messages(
         [
             f"question: {question},",
             _knowledge_context_block(knowledge_context),
+            _doc_evidence_context_block(doc_evidence_context),
             QUESTION_UNDERSTANDING_USER_INSTRUCTIONS,
             TIME_NORMOLIZATION_INSTRUCTION,
         ]

@@ -40,6 +40,7 @@ configs/*
 
 # Local embedding_model/
 embedding_model/*
+bge-large-en-v1.5/*
 *.tar.gz
 summary.md
 *.zip

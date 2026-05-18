@@ -42,6 +42,7 @@ class MultiAgentOrchestrator:
         structured_store: StructuredContextStore | None = None
         long_text_doc_steps: list[StepRecord] = []
         understanding_steps: list[StepRecord] = []
+        doc_evidence_context = ""
         self.long_text_doc_agent.last_steps = []
         self.question_understand_agent.last_understanding_steps = []
         if self.max_steps <= 0:
@@ -56,15 +57,17 @@ class MultiAgentOrchestrator:
             try:
                 structured_store = StructuredContextStore.from_task(task)
                 if self._has_doc_context(task):
-                    self.long_text_doc_agent.run(
+                    long_text_doc_output = self.long_text_doc_agent.run(
                         task,
                         structured_store=structured_store,
                     )
+                    doc_evidence_context = long_text_doc_output.evidence_context
                     long_text_doc_steps = list(self.long_text_doc_agent.last_steps)
                 understanding_output = self.question_understand_agent.run(
                     task,
                     structured_store=structured_store,
                     max_steps=self.max_steps,
+                    doc_evidence_context=doc_evidence_context,
                 )
                 understanding_steps = list(
                     self.question_understand_agent.last_understanding_steps
@@ -142,11 +145,13 @@ class MultiAgentOrchestrator:
         next_step_index = 1
         for agent_name, group_steps in step_groups:
             for step in group_steps:
+                agent_state = dict(step.agent_state)
+                agent_state["agent_name"] = agent_name
                 steps.append(
                     replace(
                         step,
                         step_index=next_step_index,
-                        agent_state={"agent_name": agent_name},
+                        agent_state=agent_state,
                     )
                 )
                 next_step_index += 1

@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml /app/pyproject.toml
 COPY README.md /app/README.md
 COPY src/ /app/src/
-COPY embedding_model/ /app/embedding_model/
+COPY bge-large-en-v1.5/ /app/embedding_model/
 COPY docker_entrypoint.sh /app/docker_entrypoint.sh
 
 RUN pip install --no-cache-dir --upgrade pip \

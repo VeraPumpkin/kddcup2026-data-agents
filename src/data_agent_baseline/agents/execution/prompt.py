@@ -33,7 +33,8 @@ Remember:
 EXECUTION_INSTRUCTIONS = [
     "Use structured semantic_plan answer_columns, filters, joins, and group_by as the only source of business intent, then construct the executable query or Python logic.",
     "Use registered DuckDB tables for CSV/JSON context data, and inspect them only to confirm available tables, columns, types, and values needed to execute the semantic_plan.",
-    "Use doc_paragraphs, doc_facts, and doc_relations for markdown facts.",
+    "Use doc_paragraphs, doc_evidence, and doc_facts for markdown evidence and facts.",
+    "Use doc_evidence.target_value, doc_evidence.evidence_text, doc_facts.entity_value_raw, doc_facts.evidence_text, and doc_paragraphs.paragraph_text exactly as aligned in semantic_plan; do not replace document evidence with unrelated same-named values.",
     "Do not use SQL LIMIT to decide the final number of answer rows unless the semantic_plan explicitly contains a structured row-count/top-N requirement. For min/max/lowest/highest selection, preserve all tied records by filtering on the selected value instead of using ORDER BY ... LIMIT 1.",
     "When a semantic_plan answer_column contains calculation instead of source_field, execute that complete calculation expression as a requested output metric.",
     "Execute value filters according to filters[].operator without restricting it to a fixed enum.",

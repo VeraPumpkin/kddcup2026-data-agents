@@ -16,7 +16,7 @@ from data_agent_baseline.benchmark.schema import PublicTask
 
 
 _READ_ONLY_SQL_PREFIXES = ("select", "with", "pragma", "describe", "show")
-_DOC_ANNOTATION_TABLES = {"doc_paragraphs", "doc_facts", "doc_relations"}
+_DOC_ANNOTATION_TABLES = {"doc_paragraphs", "doc_evidence", "doc_facts"}
 JSON_MAXIMUM_OBJECT_SIZE = 256 * 1024 * 1024
 TIME_VALUE_SAMPLE_LIMIT = 200
 _TIME_IDENTIFIER_TOKENS = {
@@ -58,9 +58,28 @@ _MONTH_NUMBERS = {
 
 _DOC_PARAGRAPH_COLUMNS = [
     ("paragraph_id", "TEXT"),
+    ("file_path", "TEXT"),
+    ("paragraph_index", "INTEGER"),
+    ("paragraph_text", "TEXT"),
+]
+
+_DOC_EVIDENCE_COLUMNS = [
+    ("evidence_id", "TEXT"),
+    ("paragraph_id", "TEXT"),
+    ("file_path", "TEXT"),
+    ("evidence_text", "TEXT"),
+    ("evidence_role", "TEXT"),
+    ("record_anchor_name", "TEXT"),
+    ("record_anchor_type", "TEXT"),
+    ("target_name", "TEXT"),
+    ("target_value", "TEXT"),
+    ("value_type", "TEXT"),
+    ("unit", "TEXT"),
+    ("status", "TEXT"),
 ]
 
 _DOC_FACT_COLUMNS = [
+    ("evidence_id", "TEXT"),
     ("paragraph_id", "TEXT"),
     ("record_anchor_name", "TEXT"),
     ("record_anchor_type", "TEXT"),
@@ -69,13 +88,8 @@ _DOC_FACT_COLUMNS = [
     ("value_type", "TEXT"),
     ("unit", "TEXT"),
     ("status", "TEXT"),
-]
-
-_DOC_RELATION_COLUMNS = [
-    ("paragraph_id", "TEXT"),
-    ("subject_name", "TEXT"),
-    ("relation_type", "TEXT"),
-    ("object_name_or_value", "TEXT"),
+    ("evidence_text", "TEXT"),
+    ("evidence_role", "TEXT"),
 ]
 
 
@@ -183,28 +197,28 @@ class StructuredContextStore:
     def table_dicts(self) -> list[dict[str, Any]]:
         return [table.to_dict() for table in self._tables]
 
-    def register_doc_fact_tables(
+    def register_doc_evidence_tables(
         self,
         *,
         paragraphs: list[dict[str, Any]],
+        evidence: list[dict[str, Any]],
         facts: list[dict[str, Any]],
-        relations: list[dict[str, Any]],
     ) -> None:
-        """Register fixed doc annotation tables in this task's in-memory DuckDB."""
+        """Register fixed targeted document evidence tables in this task's DuckDB."""
         self._register_fixed_table(
             "doc_paragraphs",
             _DOC_PARAGRAPH_COLUMNS,
             paragraphs,
         )
         self._register_fixed_table(
+            "doc_evidence",
+            _DOC_EVIDENCE_COLUMNS,
+            evidence,
+        )
+        self._register_fixed_table(
             "doc_facts",
             _DOC_FACT_COLUMNS,
             facts,
-        )
-        self._register_fixed_table(
-            "doc_relations",
-            _DOC_RELATION_COLUMNS,
-            relations,
         )
 
     def close(self) -> None:

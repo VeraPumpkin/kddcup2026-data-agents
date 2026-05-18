@@ -22,7 +22,7 @@ run:
   output_dir: /output
   run_id: ${RUN_ID}
   max_workers: ${RUN_MAX_WORKERS:-4}
-  task_timeout_seconds: ${TASK_TIMEOUT_SECONDS:-900}
+  task_timeout_seconds: ${TASK_TIMEOUT_SECONDS:-600}
 EOF
 
 rm -rf "${RUN_OUTPUT_DIR}"

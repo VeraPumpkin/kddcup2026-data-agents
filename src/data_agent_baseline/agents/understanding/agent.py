@@ -43,6 +43,7 @@ class QuestionUnderstandAgent:
         *,
         structured_store: StructuredContextStore,
         max_steps: int,
+        doc_evidence_context: str = "",
     ) -> QuestionUnderstandingOutput:
         self.last_understanding_steps = []
         if max_steps <= 0:
@@ -62,11 +63,13 @@ class QuestionUnderstandAgent:
             task=task,
             candidate_store=candidate_store,
             knowledge_context=knowledge_context,
+            doc_evidence_context=doc_evidence_context,
         )
         decision, steps = self._run_loop(
             task=task,
             tool_registry=tool_registry,
             knowledge_context=knowledge_context,
+            doc_evidence_context=doc_evidence_context,
             max_steps=max_steps,
         )
         self.last_understanding_steps = steps
@@ -84,12 +87,14 @@ class QuestionUnderstandAgent:
         task: PublicTask,
         tool_registry: UnderstandingToolRegistry,
         knowledge_context: str,
+        doc_evidence_context: str,
         max_steps: int,
     ) -> tuple[dict[str, Any], list[StepRecord]]:
         messages = build_question_understanding_messages(
             question=task.question,
             tool_descriptions=tool_registry.describe_for_prompt(),
             knowledge_context=knowledge_context,
+            doc_evidence_context=doc_evidence_context,
         )
         steps: list[StepRecord] = []
         for step_index in range(1, max_steps + 1):
