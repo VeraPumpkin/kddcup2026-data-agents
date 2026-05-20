@@ -2,10 +2,8 @@
 set -euo pipefail
 
 CONFIG_PATH="/tmp/data_agent_config.yaml"
-RUN_ID="official_eval_run"
-RUN_OUTPUT_DIR="/output/${RUN_ID}"
 
-mkdir -p /logs
+mkdir -p /logs /output
 
 cat > "${CONFIG_PATH}" <<EOF
 dataset:
@@ -20,15 +18,11 @@ agent:
 
 run:
   output_dir: /output
-  run_id: ${RUN_ID}
+  run_id: .
   max_workers: ${RUN_MAX_WORKERS:-4}
   task_timeout_seconds: ${TASK_TIMEOUT_SECONDS:-600}
 EOF
 
-rm -rf "${RUN_OUTPUT_DIR}"
+find /output -mindepth 1 -maxdepth 1 -type d -name 'task_*' -exec rm -rf {} +
 
 dabench run-benchmark --config "${CONFIG_PATH}" 2>&1 | tee /logs/runtime.log
-
-if [ -d "${RUN_OUTPUT_DIR}" ]; then
-    find "${RUN_OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'task_*' -exec cp -R {} /output/ \;
-fi

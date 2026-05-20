@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from data_agent_baseline.agents.long_text_doc.anchor_prepass import (
+    DocAnchorPrepassOutput,
+    build_doc_anchor_prepass,
+)
 from data_agent_baseline.agents.long_text_doc.prompt import (
     TARGETED_DOC_EVIDENCE_ACTION,
     build_long_text_doc_fact_messages,
@@ -27,6 +32,18 @@ MAX_EVIDENCE_CONTEXT_CHARS = 20_000
 _BLANK_LINE_PATTERN = re.compile(r"(?:\r?\n)[ \t]*(?:\r?\n)+")
 _ALLOWED_VALUE_TYPES = {"string", "number", "date", "boolean", "enum", "unknown"}
 _ALLOWED_STATUSES = {"current", "previous", "corrected", "negated", "unknown"}
+_STATUS_PRIORITY = {
+    "current": 0,
+    "corrected": 1,
+    "unknown": 2,
+    "previous": 3,
+    "negated": 4,
+}
+_ENTITY_ATTRIBUTE_BASE_COLUMNS = {
+    "record_anchor_name",
+    "record_anchor_type",
+    "evidence_ids",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,32 +127,18 @@ class DocEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class DocAttributeFact:
-    evidence_id: str
-    paragraph_id: str
-    record_anchor_name: str | None
+class DocEntityAttributes:
+    record_anchor_name: str
     record_anchor_type: str | None
-    entity_name_raw: str
-    entity_value_raw: str
-    value_type: str
-    unit: str | None
-    status: str
-    evidence_text: str
-    evidence_role: str
+    evidence_ids: str
+    attributes: dict[str, str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "evidence_id": self.evidence_id,
-            "paragraph_id": self.paragraph_id,
             "record_anchor_name": self.record_anchor_name,
             "record_anchor_type": self.record_anchor_type,
-            "entity_name_raw": self.entity_name_raw,
-            "entity_value_raw": self.entity_value_raw,
-            "value_type": self.value_type,
-            "unit": self.unit,
-            "status": self.status,
-            "evidence_text": self.evidence_text,
-            "evidence_role": self.evidence_role,
+            "evidence_ids": self.evidence_ids,
+            **self.attributes,
         }
 
     def duckdb_row(self) -> dict[str, Any]:
@@ -146,7 +149,8 @@ class DocAttributeFact:
 class LongTextDocFactOutput:
     paragraphs: list[MarkdownParagraph]
     evidence: list[DocEvidence]
-    facts: list[DocAttributeFact]
+    entity_attributes: list[DocEntityAttributes]
+    anchor_context: str
     evidence_context: str
     diagnostics: list[str] = field(default_factory=list)
 
@@ -154,7 +158,8 @@ class LongTextDocFactOutput:
         return {
             "paragraphs": [item.to_dict() for item in self.paragraphs],
             "evidence": [item.to_dict() for item in self.evidence],
-            "facts": [item.to_dict() for item in self.facts],
+            "entity_attributes": [item.to_dict() for item in self.entity_attributes],
+            "anchor_context": self.anchor_context,
             "evidence_context": self.evidence_context,
             "diagnostics": list(self.diagnostics),
         }
@@ -184,6 +189,10 @@ class LongTextDocFactAgent:
         all_paragraphs = [paragraph for document in documents for paragraph in document.paragraphs]
         evidence: list[DocEvidence] = []
         diagnostics: list[str] = []
+        anchor_prepass = build_doc_anchor_prepass(
+            question=task.question,
+            structured_store=structured_store,
+        )
 
         if all_paragraphs:
             evidence, diagnostics = self._extract_targeted_evidence(
@@ -191,19 +200,22 @@ class LongTextDocFactAgent:
                 structured_store=structured_store,
                 documents=documents,
                 paragraphs=all_paragraphs,
+                anchor_prepass=anchor_prepass,
             )
+        diagnostics = [*anchor_prepass.diagnostics, *diagnostics]
 
-        facts = self._facts_from_evidence(evidence)
-        evidence_context = self._render_evidence_context(evidence, diagnostics)
+        entity_attributes = self._entity_attributes_from_evidence(evidence)
+        evidence_context = self._render_evidence_context(evidence, diagnostics, anchor_prepass)
         structured_store.register_doc_evidence_tables(
             paragraphs=[item.duckdb_row() for item in all_paragraphs],
             evidence=[item.duckdb_row() for item in evidence],
-            facts=[item.duckdb_row() for item in facts],
+            entity_attributes=[item.duckdb_row() for item in entity_attributes],
         )
         output = LongTextDocFactOutput(
             paragraphs=all_paragraphs,
             evidence=evidence,
-            facts=facts,
+            entity_attributes=entity_attributes,
+            anchor_context=anchor_prepass.anchor_context,
             evidence_context=evidence_context,
             diagnostics=diagnostics,
         )
@@ -261,6 +273,7 @@ class LongTextDocFactAgent:
         structured_store: StructuredContextStore,
         documents: list[MarkdownDocument],
         paragraphs: list[MarkdownParagraph],
+        anchor_prepass: DocAnchorPrepassOutput,
     ) -> tuple[list[DocEvidence], list[str]]:
         messages = build_long_text_doc_fact_messages(
             task_id=task.task_id,
@@ -268,6 +281,7 @@ class LongTextDocFactAgent:
             knowledge_context=self._read_knowledge_context(task),
             schema_summary=structured_store.inspect_schema(),
             documents=[document.prompt_dict() for document in documents],
+            anchor_context=anchor_prepass.to_prompt_dict(),
         )
         paragraph_by_id = {paragraph.paragraph_id: paragraph for paragraph in paragraphs}
         raw_response = ""
@@ -403,32 +417,79 @@ class LongTextDocFactAgent:
             )
         return evidence, diagnostics
 
-    def _facts_from_evidence(self, evidence: list[DocEvidence]) -> list[DocAttributeFact]:
-        facts: list[DocAttributeFact] = []
+    def _entity_attributes_from_evidence(
+        self,
+        evidence: list[DocEvidence],
+    ) -> list[DocEntityAttributes]:
+        grouped: dict[tuple[str, str | None], list[DocEvidence]] = {}
         for item in evidence:
-            facts.append(
-                DocAttributeFact(
-                    evidence_id=item.evidence_id,
-                    paragraph_id=item.paragraph_id,
-                    record_anchor_name=item.record_anchor_name,
-                    record_anchor_type=item.record_anchor_type,
-                    entity_name_raw=item.target_name,
-                    entity_value_raw=item.target_value,
-                    value_type=item.value_type,
-                    unit=item.unit,
-                    status=item.status,
-                    evidence_text=item.evidence_text,
-                    evidence_role=item.evidence_role,
+            if not item.record_anchor_name:
+                continue
+            grouped.setdefault(
+                (item.record_anchor_name, item.record_anchor_type),
+                [],
+            ).append(item)
+
+        attributes: list[DocEntityAttributes] = []
+        for (record_anchor_name, record_anchor_type), items in sorted(grouped.items()):
+            by_column: dict[str, list[DocEvidence]] = {}
+            for item in items:
+                by_column.setdefault(_attribute_column_name(item.target_name), []).append(item)
+            attribute_values = {
+                column_name: self._selected_attribute_value(column_items)
+                for column_name, column_items in sorted(by_column.items())
+            }
+            attributes.append(
+                DocEntityAttributes(
+                    record_anchor_name=record_anchor_name,
+                    record_anchor_type=record_anchor_type,
+                    evidence_ids=json.dumps(
+                        sorted({item.evidence_id for item in items}),
+                        ensure_ascii=False,
+                    ),
+                    attributes=attribute_values,
                 )
             )
-        return facts
+        return attributes
+
+    def _selected_attribute_value(self, evidence: list[DocEvidence]) -> str:
+        if not evidence:
+            return ""
+        ordered = sorted(
+            evidence,
+            key=lambda item: (
+                _STATUS_PRIORITY.get(item.status, len(_STATUS_PRIORITY)),
+                item.target_value,
+                item.evidence_id,
+            ),
+        )
+        best_status = ordered[0].status
+        best_values = sorted(
+            {
+                item.target_value
+                for item in ordered
+                if item.status == best_status and item.target_value
+            }
+        )
+        if len(best_values) == 1:
+            return best_values[0]
+        return json.dumps(best_values, ensure_ascii=False)
 
     def _render_evidence_context(
         self,
         evidence: list[DocEvidence],
         diagnostics: list[str],
+        anchor_prepass: DocAnchorPrepassOutput,
     ) -> str:
         lines = []
+        if anchor_prepass.anchors:
+            lines.append("Structured anchor candidates:")
+            for anchor in anchor_prepass.anchors:
+                lines.append(
+                    f"- anchor={anchor.anchor_value} | type={anchor.anchor_type} | "
+                    f"source_field={anchor.source_field} | matched_field={anchor.matched_field} | "
+                    f"matched_phrase={anchor.matched_phrase}"
+                )
         if not evidence:
             lines.append("No targeted document evidence extracted.")
         for item in evidence:
@@ -529,3 +590,14 @@ def _allowed_text(value: Any, allowed: set[str], *, default: str) -> str:
 
 def _single_line(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _attribute_column_name(target_name: str) -> str:
+    column_name = re.sub(r"[^A-Za-z0-9_]+", "_", str(target_name).strip()).strip("_").lower()
+    if not column_name:
+        column_name = "attribute"
+    if column_name[0].isdigit():
+        column_name = f"attr_{column_name}"
+    if column_name in _ENTITY_ATTRIBUTE_BASE_COLUMNS:
+        column_name = f"attr_{column_name}"
+    return column_name

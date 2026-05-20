@@ -28,10 +28,11 @@ VALUE_RESOLVER_DISTINCT_VALUE_LIMIT = 5000
 DEFAULT_JOIN_SEARCH_TOP_K = 80
 MAX_JOIN_PATH_DEPTH = 3
 JOIN_PATH_TOP_K = 3
-SUPPORTED_JOIN_TYPES = {"foreign_key", "shared_key", "value_overlap", "row_order"}
+SUPPORTED_JOIN_TYPES = {"foreign_key", "shared_key", "doc_lookup", "value_overlap", "row_order"}
 JOIN_TYPE_BASE_SCORES = {
     "foreign_key": 0.95,
     "shared_key": 0.72,
+    "doc_lookup": 0.68,
     "value_overlap": 0.5,
     "row_order": 0.2,
 }
@@ -126,8 +127,18 @@ class UnderstandingToolRegistry:
                 "calculation": {
                     "description": "Derived calculation expression using exact table.column fields.",
                 },
+                "logic": {
+                    "type": "string",
+                    "enum": ["OR"],
+                    "description": "Use only for a one-level disjunction of ordinary filter conditions.",
+                },
+                "conditions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                    },
+                },
             },
-            "required": ["field", "operator"],
             "additionalProperties": False,
         }
         join_schema = {
@@ -492,61 +503,15 @@ class UnderstandingToolRegistry:
                 required_plan_fields.update(FIELD_REFERENCE_RE.findall(calculation))
 
         for index, filter_item in enumerate(filters, start=1):
-            if not isinstance(filter_item, dict):
-                raise ValueError(f"semantic_plan.filters[{index}] must be an object.")
-            self._reject_unsupported_keys(
-                filter_item,
-                {"field", "operator", "value", "calculation"},
-                f"filters[{index}]",
-            )
-            field = self._required_string(filter_item.get("field"), f"filters[{index}].field")
-            operator = self._required_string(
-                filter_item.get("operator"),
-                f"filters[{index}].operator",
-            )
-            normalized_operator = operator.strip().upper()
-            has_value = "value" in filter_item
-            has_calculation = "calculation" in filter_item
-            if normalized_operator in {"IS_NOT_NULL", "IS NOT NULL"}:
-                raise ValueError(
-                    f"semantic_plan.filters[{index}].operator IS_NOT_NULL is unsupported. "
-                    "For extrema selection, use calculation."
-                )
-            is_null_filter = normalized_operator == "IS_NULL"
-            if is_null_filter:
-                if has_value or has_calculation:
-                    raise ValueError(
-                        f"semantic_plan.filters[{index}] with IS_NULL must not include value "
-                        "or calculation."
-                    )
-            elif has_value and has_calculation:
-                raise ValueError(
-                    f"semantic_plan.filters[{index}] must include exactly one of value or calculation."
-                )
-            elif not has_value and not has_calculation:
-                raise ValueError(
-                    f"semantic_plan.filters[{index}] must include value or calculation; "
-                    "IS_NOT_NULL is unsupported. For extrema selection, use calculation."
-                )
-            self._validate_schema_field(field, valid_fields, f"filters[{index}].field")
-            required_plan_fields.add(field)
-            if has_value and not is_null_filter:
-                self._validate_filter_value_resolution(
-                    filter_item=filter_item,
-                    field=field,
-                    operator=operator,
+            required_plan_fields.update(
+                self._validate_filter_or_group(
+                    filter_item,
+                    valid_fields=valid_fields,
+                    valid_column_names=valid_column_names,
                     path=f"filters[{index}]",
                 )
-            if has_calculation:
-                self._validate_direct_calculation_expression(
-                    filter_item.get("calculation"),
-                    valid_fields,
-                    valid_column_names,
-                    f"filters[{index}]",
-                )
-                required_plan_fields.update(
-                    FIELD_REFERENCE_RE.findall(str(filter_item.get("calculation")))
-                )
+            )
+        self._validate_impossible_and_filters(filters)
 
         for index, join in enumerate(joins, start=1):
             if not isinstance(join, dict):
@@ -579,6 +544,144 @@ class UnderstandingToolRegistry:
 
         self._validate_join_structure(joins, required_plan_fields)
         return _json_compatible(plan)
+
+    def _validate_filter_or_group(
+        self,
+        item: Any,
+        *,
+        valid_fields: set[str],
+        valid_column_names: set[str],
+        path: str,
+    ) -> set[str]:
+        if not isinstance(item, dict):
+            raise ValueError(f"semantic_plan.{path} must be an object.")
+        if "logic" in item or "conditions" in item:
+            self._reject_unsupported_keys(item, {"logic", "conditions"}, path)
+            logic = self._required_string(item.get("logic"), f"{path}.logic").upper()
+            if logic != "OR":
+                raise ValueError(f"semantic_plan.{path}.logic must be OR.")
+            conditions = self._require_list(item.get("conditions"), f"{path}.conditions")
+            if len(conditions) < 2:
+                raise ValueError(f"semantic_plan.{path}.conditions must contain at least two items.")
+            fields: set[str] = set()
+            for condition_index, condition in enumerate(conditions, start=1):
+                if not isinstance(condition, dict):
+                    raise ValueError(
+                        f"semantic_plan.{path}.conditions[{condition_index}] must be an object."
+                    )
+                if "logic" in condition or "conditions" in condition:
+                    raise ValueError(
+                        f"semantic_plan.{path}.conditions[{condition_index}] must be an ordinary "
+                        "filter; nested OR groups are unsupported."
+                    )
+                fields.update(
+                    self._validate_filter_item(
+                        condition,
+                        valid_fields=valid_fields,
+                        valid_column_names=valid_column_names,
+                        path=f"{path}.conditions[{condition_index}]",
+                    )
+                )
+            return fields
+        return self._validate_filter_item(
+            item,
+            valid_fields=valid_fields,
+            valid_column_names=valid_column_names,
+            path=path,
+        )
+
+    def _validate_filter_item(
+        self,
+        item: dict[str, Any],
+        *,
+        valid_fields: set[str],
+        valid_column_names: set[str],
+        path: str,
+    ) -> set[str]:
+        self._reject_unsupported_keys(
+            item,
+            {"field", "operator", "value", "calculation"},
+            path,
+        )
+        field = self._required_string(item.get("field"), f"{path}.field")
+        operator = self._required_string(item.get("operator"), f"{path}.operator")
+        normalized_operator = operator.strip().upper()
+        has_value = "value" in item
+        has_calculation = "calculation" in item
+        if normalized_operator in {"IS_NOT_NULL", "IS NOT NULL"}:
+            raise ValueError(
+                f"semantic_plan.{path}.operator IS_NOT_NULL is unsupported. "
+                "For extrema selection, use calculation."
+            )
+        is_null_filter = normalized_operator == "IS_NULL"
+        if is_null_filter:
+            if has_value or has_calculation:
+                raise ValueError(
+                    f"semantic_plan.{path} with IS_NULL must not include value or calculation."
+                )
+        elif has_value and has_calculation:
+            raise ValueError(
+                f"semantic_plan.{path} must include exactly one of value or calculation."
+            )
+        elif not has_value and not has_calculation:
+            raise ValueError(
+                f"semantic_plan.{path} must include value or calculation; "
+                "IS_NOT_NULL is unsupported. For extrema selection, use calculation."
+            )
+        self._validate_schema_field(field, valid_fields, f"{path}.field")
+        fields = {field}
+        if has_value and not is_null_filter:
+            self._validate_filter_value_resolution(
+                filter_item=item,
+                field=field,
+                operator=operator,
+                path=path,
+            )
+        if has_calculation:
+            self._validate_direct_calculation_expression(
+                item.get("calculation"),
+                valid_fields,
+                valid_column_names,
+                path,
+            )
+            fields.update(FIELD_REFERENCE_RE.findall(str(item.get("calculation"))))
+        return fields
+
+    def _validate_impossible_and_filters(self, filters: list[Any]) -> None:
+        bounds_by_field: dict[str, dict[str, list[float]]] = {}
+        for item in filters:
+            if not isinstance(item, dict) or "logic" in item:
+                continue
+            field = self._string_or_none(item.get("field"))
+            operator = self._string_or_none(item.get("operator"))
+            if field is None or operator is None:
+                continue
+            value = self._numeric_filter_value(item.get("value"))
+            if value is None:
+                continue
+            normalized_operator = operator.strip().upper()
+            if normalized_operator in {">", ">="}:
+                bounds_by_field.setdefault(field, {"lower": [], "upper": []})["lower"].append(value)
+            if normalized_operator in {"<", "<="}:
+                bounds_by_field.setdefault(field, {"lower": [], "upper": []})["upper"].append(value)
+        for field, bounds in bounds_by_field.items():
+            if not bounds["lower"] or not bounds["upper"]:
+                continue
+            if max(bounds["lower"]) > min(bounds["upper"]):
+                raise ValueError(
+                    "semantic_plan.filters contains impossible AND range filters for "
+                    f"{field}. Use NOT_BETWEEN or an OR filter group for outside-range semantics."
+                )
+
+    def _numeric_filter_value(self, value: Any) -> float | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
 
     def _reject_unsupported_keys(
         self,
@@ -677,7 +780,12 @@ class UnderstandingToolRegistry:
         ):
             return
         raise ValueError(
-            f"semantic_plan.{path} must use a value returned by value_resolver."
+            f"semantic_plan.{path}.value is not grounded for `{field}`: "
+            f"no successful value_resolver(selected_column=`{field}`) returned this exact resolved_value.\n"
+            "Decide which case applies before your next action; do not treat these cases as sequential steps.\n"
+            "Case A: this field/value has not been checked yet. Call value_resolver for this exact field/value.\n"
+            "Case B: value_resolver returned resolved for this field, but your filter value differs. Copy value_resolver.resolved_value exactly.\n"
+            "Case C: value_resolver returned unresolved for this field/value. Do not change the operator, use raw/null/array values, or use calculation to bypass grounding; call semantic_schema_search for the original value phrase and choose another field/value that resolves."
         )
 
     def _value_resolution_matches(
@@ -1571,6 +1679,8 @@ class UnderstandingToolRegistry:
         metadata = candidate_payload.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         if join_type == "foreign_key":
+            return "strong"
+        if join_type == "doc_lookup":
             return "strong"
         if join_type == "shared_key":
             return "medium"

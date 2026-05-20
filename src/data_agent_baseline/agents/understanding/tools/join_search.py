@@ -24,11 +24,15 @@ WEAK_CONTAINMENT_THRESHOLD = 0.65
 MAX_SAMPLE_VALUES = 5
 GENERIC_SHARED_KEY_NAMES = {"id", "key", "code"}
 JOIN_TYPE_PRIORITY = {
+    "doc_lookup": 5,
     "foreign_key": 4,
     "shared_key": 3,
     "value_overlap": 2,
     "row_order": 1,
 }
+DOC_LOOKUP_FIELDS = {"record_anchor_name", "target_value"}
+DOC_ENTITY_ATTRIBUTES_TABLE = "doc_entity_attributes"
+DOC_ENTITY_ATTRIBUTE_NON_LOOKUP_FIELDS = {"record_anchor_type", "evidence_ids"}
 
 
 def _normalize(text: str) -> str:
@@ -90,6 +94,7 @@ class RuleBasedJoinSearcher:
                 )
 
         candidates.extend(self._value_overlap_candidates(candidate_store))
+        candidates.extend(self._doc_lookup_candidates(candidate_store))
         strong_pairs = self._strong_table_pairs(candidates)
         candidates.extend(self._row_order_candidates(candidate_store, strong_pairs))
 
@@ -319,6 +324,97 @@ class RuleBasedJoinSearcher:
                     )
                 )
         return candidates
+
+    def _doc_lookup_candidates(self, candidate_store: CandidateStore) -> list[JoinCandidate]:
+        fields = [field for field in candidate_store.fields if field.table]
+        structured_store = getattr(candidate_store, "structured_store", None)
+        if structured_store is None:
+            return []
+
+        candidates: list[JoinCandidate] = []
+        for left_index, left in enumerate(fields):
+            for right in fields[left_index + 1 :]:
+                if left.table == right.table:
+                    continue
+                doc_field, structured_field = self._doc_lookup_field_pair(left, right)
+                if doc_field is None or structured_field is None:
+                    continue
+                if not self._structured_doc_join_key_like(structured_field):
+                    continue
+                if (
+                    structured_store.table_for_field(left.field) is None
+                    or structured_store.table_for_field(right.field) is None
+                ):
+                    continue
+                overlap_stats = structured_store.value_overlap(
+                    left.field,
+                    right.field,
+                    compare_as_number=None,
+                )
+                overlap_count = int(overlap_stats.get("overlap_count") or 0)
+                if overlap_count <= 0:
+                    continue
+                metadata = self._overlap_metadata(
+                    left=left,
+                    right=right,
+                    overlap_count=overlap_count,
+                    left_distinct_count=int(overlap_stats.get("left_distinct_count") or 0),
+                    right_distinct_count=int(overlap_stats.get("right_distinct_count") or 0),
+                    sample_values=[
+                        str(value)
+                        for value in overlap_stats.get("sample_values", [])
+                        if str(value).strip()
+                    ],
+                    entity_compatible=True,
+                )
+                metadata.update(
+                    {
+                        "join_type": "doc_lookup",
+                        "overlap_tier": "key_overlap",
+                        "fanout_risk": "low",
+                        "many_to_many_risk": "low",
+                    }
+                )
+                candidates.append(
+                    JoinCandidate(
+                        left=structured_field.field,
+                        right=doc_field.field,
+                        score=0.78,
+                        evidence=[
+                            f"document lookup join links structured key `{structured_field.field}` "
+                            f"to document field `{doc_field.field}`",
+                            f"fields share {overlap_count} normalized values",
+                        ],
+                        metadata=metadata,
+                    )
+                )
+        return candidates
+
+    def _doc_lookup_field_pair(
+        self,
+        left: FieldProfile,
+        right: FieldProfile,
+    ) -> tuple[FieldProfile | None, FieldProfile | None]:
+        left_is_doc = left.kind == "doc_annotation" and self._is_doc_lookup_field(left)
+        right_is_doc = right.kind == "doc_annotation" and self._is_doc_lookup_field(right)
+        if left_is_doc == right_is_doc:
+            return None, None
+        return (left, right) if left_is_doc else (right, left)
+
+    def _is_doc_lookup_field(self, field: FieldProfile) -> bool:
+        normalized_table = _normalize(field.table or "")
+        normalized_name = _normalize(field.name)
+        if normalized_table == DOC_ENTITY_ATTRIBUTES_TABLE:
+            return normalized_name not in DOC_ENTITY_ATTRIBUTE_NON_LOOKUP_FIELDS
+        return normalized_name in DOC_LOOKUP_FIELDS
+
+    def _structured_doc_join_key_like(self, field: FieldProfile) -> bool:
+        normalized = _normalize(field.name)
+        if normalized in {"id", "key", "code", "uuid", "guid"}:
+            return True
+        if normalized.startswith(("link_to_", "ref_", "fk_")):
+            return True
+        return normalized.endswith(("_id", "_key", "_code", "_uuid", "_guid"))
 
     def _row_order_candidates(
         self,

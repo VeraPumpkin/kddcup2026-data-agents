@@ -51,15 +51,17 @@ def resolve_run_id(run_id: str | None = None) -> str:
     normalized = run_id.strip()
     if not normalized:
         raise ValueError("run_id must not be empty.")
-    if normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+    if normalized == ".":
+        return normalized
+    if normalized == ".." or "/" in normalized or "\\" in normalized:
         raise ValueError("run_id must be a single directory name, not a path.")
     return normalized
 
 
 def create_run_output_dir(output_root: Path, *, run_id: str | None = None) -> tuple[str, Path]:
     effective_run_id = resolve_run_id(run_id)
-    run_output_dir = output_root / effective_run_id
-    run_output_dir.mkdir(parents=True, exist_ok=False)
+    run_output_dir = output_root if effective_run_id == "." else output_root / effective_run_id
+    run_output_dir.mkdir(parents=True, exist_ok=effective_run_id == ".")
     return effective_run_id, run_output_dir
 
 
@@ -70,7 +72,7 @@ def create_single_task_run_output_dir(
     run_id: str | None = None,
 ) -> tuple[str, Path]:
     effective_run_id = resolve_run_id(run_id)
-    run_output_dir = output_root / effective_run_id
+    run_output_dir = output_root if effective_run_id == "." else output_root / effective_run_id
     task_output_dir = run_output_dir / task_id
     if task_output_dir.exists():
         raise FileExistsError(f"Task output already exists: {task_output_dir}")

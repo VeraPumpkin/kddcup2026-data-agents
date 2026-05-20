@@ -43,6 +43,20 @@ How to behave:
    status/correction rule, comparison operand, or entity identification required by the question.
 7. If no relevant evidence is present, return an empty evidence array.
 8. Use concise target_name and target_value strings copied from the evidence whenever possible.
+9. When anchor_context contains structured anchor candidates, prioritize paragraphs that mention
+   those anchor values or explain document records that can join to those anchors.
+10. When multiple required facts describe the same document entity, keep the same
+    record_anchor_name and record_anchor_type across those evidence items.
+11. If a structured anchor appears directly in a document record, use it as record_anchor_name
+    when it identifies that document entity; otherwise expose it as target_value when it is the
+    value needed for a later join.
+12. If the question needs document-side filtering but no structured anchor candidate matched,
+    extract matching document entities and include any explicitly stated key, id, code, or link
+    value that can connect the document entity to structured tables.
+13. If the question asks for a count, percentage, ratio, or aggregate over document entities,
+    extract the full relevant entity set needed for the denominator and the numerator/filter
+    attributes for those entities, not only illustrative examples.
+14. Do not apply task-specific exceptions, task id rules, fixed record ids, or fixed answer values.
 
 Status definitions:
 - current: a currently valid value stated without correction or negation.
@@ -93,12 +107,14 @@ def build_long_text_doc_fact_messages(
     knowledge_context: str,
     schema_summary: dict[str, Any],
     documents: list[dict[str, Any]],
+    anchor_context: dict[str, Any],
 ) -> list[ModelMessage]:
     user_payload = {
         "task_id": task_id,
         "question": question,
         "knowledge_context": knowledge_context,
         "schema_summary": schema_summary,
+        "anchor_context": anchor_context,
         "documents": documents,
     }
     return [
@@ -113,7 +129,8 @@ def build_long_text_doc_repair_message(error: str) -> ModelMessage:
             "The previous targeted document evidence response was invalid. "
             "Return exactly one raw JSON object with action extract_targeted_doc_evidence. "
             "Keep only relevant evidence. Ensure every evidence_text is an exact substring "
-            "of the paragraph_text for its paragraph_id."
+            "of the paragraph_text for its paragraph_id. If a concise excerpt was not exact, "
+            "use the full paragraph_text or an exact original sentence from that paragraph."
         ),
         "error": error,
     }

@@ -16,7 +16,7 @@ from data_agent_baseline.benchmark.schema import PublicTask
 
 
 _READ_ONLY_SQL_PREFIXES = ("select", "with", "pragma", "describe", "show")
-_DOC_ANNOTATION_TABLES = {"doc_paragraphs", "doc_evidence", "doc_facts"}
+_DOC_ANNOTATION_TABLES = {"doc_paragraphs", "doc_evidence", "doc_entity_attributes"}
 JSON_MAXIMUM_OBJECT_SIZE = 256 * 1024 * 1024
 TIME_VALUE_SAMPLE_LIMIT = 200
 _TIME_IDENTIFIER_TOKENS = {
@@ -78,18 +78,10 @@ _DOC_EVIDENCE_COLUMNS = [
     ("status", "TEXT"),
 ]
 
-_DOC_FACT_COLUMNS = [
-    ("evidence_id", "TEXT"),
-    ("paragraph_id", "TEXT"),
+_DOC_ENTITY_ATTRIBUTE_BASE_COLUMNS = [
     ("record_anchor_name", "TEXT"),
     ("record_anchor_type", "TEXT"),
-    ("entity_name_raw", "TEXT"),
-    ("entity_value_raw", "TEXT"),
-    ("value_type", "TEXT"),
-    ("unit", "TEXT"),
-    ("status", "TEXT"),
-    ("evidence_text", "TEXT"),
-    ("evidence_role", "TEXT"),
+    ("evidence_ids", "TEXT"),
 ]
 
 
@@ -202,7 +194,7 @@ class StructuredContextStore:
         *,
         paragraphs: list[dict[str, Any]],
         evidence: list[dict[str, Any]],
-        facts: list[dict[str, Any]],
+        entity_attributes: list[dict[str, Any]],
     ) -> None:
         """Register fixed targeted document evidence tables in this task's DuckDB."""
         self._register_fixed_table(
@@ -215,10 +207,11 @@ class StructuredContextStore:
             _DOC_EVIDENCE_COLUMNS,
             evidence,
         )
+        entity_attribute_columns = _doc_entity_attribute_columns(entity_attributes)
         self._register_fixed_table(
-            "doc_facts",
-            _DOC_FACT_COLUMNS,
-            facts,
+            "doc_entity_attributes",
+            entity_attribute_columns,
+            entity_attributes,
         )
 
     def close(self) -> None:
@@ -398,6 +391,48 @@ class StructuredContextStore:
             "matches": [str(row[0]) for row in rows],
         }
 
+    def match_rows(
+        self,
+        field_name: str,
+        raw_value: Any,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        table_name, column = _split_field(field_name)
+        if not table_name or not column:
+            return []
+        table = self._table_by_name.get(_normalize_identifier(table_name))
+        if table is None or column not in table.columns:
+            return []
+        normalized_raw = _normalize_value(raw_value)
+        if not normalized_raw:
+            return []
+        quoted_table = _quote_identifier(table.name)
+        quoted_column = _quote_identifier(column)
+        cursor = self.conn.execute(
+            f"""
+            SELECT *
+            FROM {quoted_table}
+            WHERE {quoted_column} IS NOT NULL
+              AND trim(regexp_replace(
+                    lower(CAST({quoted_column} AS VARCHAR)),
+                    '[^a-z0-9]+',
+                    ' ',
+                    'g'
+                  )) = {self.sql_literal(normalized_raw)}
+            LIMIT {max(1, int(limit))}
+            """
+        )
+        rows = cursor.fetchall()
+        columns = [str(item[0]) for item in cursor.description or []]
+        return [
+            {
+                column_name: _json_value(value)
+                for column_name, value in zip(columns, row, strict=False)
+            }
+            for row in rows
+        ]
+
     def value_overlap(
         self,
         left_field: str,
@@ -570,6 +605,60 @@ class StructuredContextStore:
         self._tables.append(table)
         self._tables.sort(key=lambda item: (item.kind, item.path, item.name))
         self._table_by_name[normalized_name] = table
+
+    def _drop_table_info(self, table_name: str) -> None:
+        normalized_name = _normalize_identifier(table_name)
+        self._tables = [
+            existing
+            for existing in self._tables
+            if _normalize_identifier(existing.name) != normalized_name
+        ]
+        self._table_by_name.pop(normalized_name, None)
+
+
+def _doc_entity_attribute_columns(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    base_names = {name for name, _ in _DOC_ENTITY_ATTRIBUTE_BASE_COLUMNS}
+    dynamic_names = sorted(
+        {
+            str(column_name)
+            for row in rows
+            for column_name in row
+            if str(column_name) not in base_names
+        }
+    )
+    return [
+        *_DOC_ENTITY_ATTRIBUTE_BASE_COLUMNS,
+        *[
+            (column_name, _doc_entity_attribute_type(rows, column_name))
+            for column_name in dynamic_names
+        ],
+    ]
+
+
+def _doc_entity_attribute_type(rows: list[dict[str, Any]], column_name: str) -> str:
+    values = [
+        row.get(column_name)
+        for row in rows
+        if row.get(column_name) is not None and str(row.get(column_name)).strip()
+    ]
+    if values and all(_parse_numeric_text(value) is not None for value in values):
+        return "DOUBLE"
+    return "TEXT"
+
+
+def _parse_numeric_text(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if math.isfinite(float(value)):
+            return float(value)
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+        return float(text)
+    return None
 
 
 def _register_csv_table(
